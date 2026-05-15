@@ -2746,156 +2746,325 @@ Admin2,admin2@example.com,AdminPass!,admin
         # ── ct5: Realtime contest ─────────────────
         with ct5:
             st.markdown("#### ⚡ Realtime Contest Control")
-            st.caption("Open and close a competition window, then monitor the live leaderboard.")
+            st.caption("Preset student roster, open/close exam window, and monitor live submissions.")
 
-            # Load competitions from BOTH sources
+            # Load all competitions
             all_rt_comps = {}
-
-            # 1. From competition_catalog (admin-created)
             try:
                 for doc in db.collection("competition_catalog").stream():
                     d = doc.to_dict()
                     n = d.get("name","")
-                    if n: all_rt_comps[n] = {"doc_id":doc.id,"source":"catalog","data":d}
+                    if n: all_rt_comps[n] = d
             except: pass
-
-            # 2. From built-in + custom via get_all_competitions
             for n, info in get_all_competitions(include_disabled=True).items():
                 if n not in all_rt_comps:
-                    all_rt_comps[n] = {"doc_id":None,"source":"builtin","data":info}
+                    all_rt_comps[n] = info
 
             if not all_rt_comps:
                 st.warning("No competitions found. Create one in the ➕ Add Competition tab first.")
             else:
-                sel_name = st.selectbox(
-                    "Select competition to run",
-                    list(all_rt_comps.keys()),
-                    key="rt_sel"
-                )
-                sel_info = all_rt_comps[sel_name]
+                sel_name = st.selectbox("Select competition to run",
+                    list(all_rt_comps.keys()), key="rt_sel")
 
-                # Load or create realtime session doc
-                rt_doc_ref = db.collection("realtime_sessions").document(
-                    sel_name.replace(" ","_").replace("/","_")
-                )
-                rt_doc = rt_doc_ref.get()
-                rt_data = rt_doc.to_dict() if rt_doc.exists else {}
-                status  = rt_data.get("status","not started")
+                rt_doc_id  = sel_name.replace(" ","_").replace("/","_")
+                rt_doc_ref = db.collection("realtime_sessions").document(rt_doc_id)
+                rt_doc     = rt_doc_ref.get()
+                rt_data    = rt_doc.to_dict() if rt_doc.exists else {}
+                status     = rt_data.get("status","not started")
+                roster     = rt_data.get("roster",[])        # list of UIDs
+                require_roster = rt_data.get("require_roster", False)
 
-                # Status badge
-                badge_color = {"open":"#22C55E","closed":"#EF4444","not started":"#8898CC"}.get(status,"#8898CC")
-                st.markdown(
-                    f"<div style='display:inline-flex;align-items:center;gap:8px;"
-                    f"background:#F8F9FF;border:1.5px solid #E8ECF8;border-radius:8px;"
-                    f"padding:8px 16px;margin-bottom:16px;'>"
-                    f"<span style='width:10px;height:10px;border-radius:50%;"
-                    f"background:{badge_color};display:inline-block;'></span>"
-                    f"<span style='font-weight:600;color:#1B2B6B;'>Status: {status.upper()}</span>"
-                    f"</div>",
-                    unsafe_allow_html=True
-                )
-                if rt_data.get("opened_at"):
-                    st.caption(f"Opened: {rt_data['opened_at'].strftime('%d %b %Y %H:%M')}")
-                if rt_data.get("closed_at"):
-                    st.caption(f"Closed: {rt_data['closed_at'].strftime('%d %b %Y %H:%M')}")
+                # ── Tabs inside realtime ────────────
+                rt1, rt2, rt3 = st.tabs(["📋  Roster", "⚡  Controls", "🏆  Live Monitor"])
 
-                # Control buttons
-                c1,c2,c3 = st.columns(3)
-                if c1.button("▶️  Open exam", type="primary", use_container_width=True):
-                    rt_doc_ref.set({
-                        "competition": sel_name,
-                        "status":      "open",
-                        "opened_at":   datetime.now(timezone.utc),
-                        "closed_at":   None,
-                    }, merge=True)
-                    st.success(f"✅  **{sel_name}** is now OPEN — students can start!")
-                    st.rerun()
+                # ── rt1: Roster management ───────────
+                with rt1:
+                    st.markdown("#### Student Roster")
+                    st.caption("Only students on the roster can enter this competition. Leave roster empty to allow all students.")
 
-                if c2.button("⏹️  Close exam", use_container_width=True):
-                    rt_doc_ref.set({
-                        "status":    "closed",
-                        "closed_at": datetime.now(timezone.utc),
-                    }, merge=True)
-                    st.warning(f"🔒  **{sel_name}** is now CLOSED.")
-                    st.rerun()
+                    # Require roster toggle
+                    new_require = st.toggle(
+                        "Restrict to roster only (block students not on list)",
+                        value=require_roster, key="rt_require_roster")
+                    if new_require != require_roster:
+                        rt_doc_ref.set({"require_roster": new_require}, merge=True)
+                        st.rerun()
 
-                if c3.button("🔄  Reset", use_container_width=True):
-                    rt_doc_ref.set({
-                        "competition": sel_name,
-                        "status":      "not started",
-                        "opened_at":   None,
-                        "closed_at":   None,
-                    })
-                    st.info("Reset to draft.")
-                    st.rerun()
+                    st.divider()
 
-                st.divider()
-
-                # Share link
-                app_url = st.secrets.get("APP_URL","https://share.streamlit.io")
-                share_url = f"{app_url}?comp={sel_name.replace(' ','+')}"
-                st.markdown("**📎 Share this link with students:**")
-                st.code(share_url, language=None)
-
-                st.divider()
-
-                # Live leaderboard
-                st.markdown("#### 🏆 Live Leaderboard")
-                st.caption("Click Refresh to update. Press R on keyboard to reload the page.")
-
-                if st.button("🔄  Refresh leaderboard", key="rt_refresh", type="primary"):
-                    st.session_state["rt_lb_show"] = True
-
-                if st.session_state.get("rt_lb_show"):
+                    # Load all students for selection
                     try:
-                        scores = []
-                        for u in db.collection("users").stream():
-                            uid  = u.id
-                            prof = u.to_dict()
-                            if prof.get("role") == "admin": continue
-                            uname = prof.get("display_name","—")
-                            ss = list(
-                                db.collection("users").document(uid)
-                                .collection("exam_sessions")
-                                .where("competition","==",sel_name)
-                                .order_by("raw_score",direction=firestore.Query.DESCENDING)
-                                .limit(1).stream()
-                            )
-                            if ss:
-                                s = ss[0].to_dict()
-                                ts = s.get("timestamp_start")
-                                scores.append({
-                                    "name":  uname,
-                                    "score": s.get("raw_score",0),
-                                    "max":   s.get("max_score",0),
-                                    "pct":   s.get("pct",0),
-                                    "time":  ts.strftime("%H:%M") if ts else "—",
-                                    "dur":   f"{s.get('duration_sec',0)//60}m {s.get('duration_sec',0)%60}s",
-                                })
-                        scores.sort(key=lambda x:x["score"],reverse=True)
+                        all_students = [
+                            {"uid": d.id, **d.to_dict()}
+                            for d in db.collection("users").stream()
+                            if d.to_dict().get("role","student") != "admin"
+                        ]
+                    except:
+                        all_students = []
 
-                        if not scores:
-                            st.info("No submissions yet. Waiting for students…")
+                    # Current roster display
+                    roster_uids = set(roster)
+                    roster_members = [s for s in all_students if s["uid"] in roster_uids]
+                    non_roster    = [s for s in all_students if s["uid"] not in roster_uids]
+
+                    st.markdown(f"**Current roster: {len(roster_members)} student(s)**")
+                    if roster_members:
+                        for s in roster_members:
+                            c1,c2,c3 = st.columns([4,3,1])
+                            c1.markdown(f"**{s.get('display_name','—')}**")
+                            c2.caption(s.get("email","—"))
+                            if c3.button("✕", key=f"rm_{s['uid']}_{rt_doc_id}",
+                                         use_container_width=True):
+                                new_roster = [u for u in roster if u != s["uid"]]
+                                rt_doc_ref.set({"roster": new_roster}, merge=True)
+                                st.rerun()
+                    else:
+                        if require_roster:
+                            st.warning("Roster is empty — no students can enter yet. Add students below.")
                         else:
-                            st.markdown(f"**{len(scores)} submission(s)**")
-                            # Header
-                            h1,h2,h3,h4,h5,h6 = st.columns([1,4,2,2,2,2])
-                            for col,lbl in zip([h1,h2,h3,h4,h5,h6],
-                                               ["Rank","Name","Score","Accuracy","Time","Duration"]):
-                                col.markdown(f"**{lbl}**")
-                            st.divider()
-                            for rank,s in enumerate(scores,1):
-                                medal = "🥇" if rank==1 else("🥈" if rank==2 else("🥉" if rank==3 else f"**#{rank}**"))
-                                r1,r2,r3,r4,r5,r6 = st.columns([1,4,2,2,2,2])
-                                r1.markdown(medal)
-                                r2.markdown(f"**{s['name']}**")
-                                r3.markdown(f"{s['score']} / {s['max']}")
-                                r4.markdown(f"{s['pct']}%")
-                                r5.markdown(s["time"])
-                                r6.markdown(s["dur"])
+                            st.info("No roster set — all students can enter.")
 
-                    except Exception as e:
-                        st.error(f"Leaderboard error: {e}")
+                    st.divider()
+
+                    # Add students
+                    st.markdown("**Add students to roster**")
+
+                    # Option 1: Search and add individually
+                    search_r = st.text_input("Search by name or email", key="rt_roster_search")
+                    filtered_r = [s for s in non_roster
+                                  if search_r.lower() in s.get("display_name","").lower()
+                                  or search_r.lower() in s.get("email","").lower()
+                                  ] if search_r else non_roster
+
+                    if filtered_r:
+                        st.caption(f"{len(filtered_r)} student(s) not on roster")
+                        add_selected = []
+                        for s in filtered_r[:20]:
+                            if st.checkbox(
+                                f"{s.get('display_name','—')} · {s.get('email','—')}",
+                                key=f"add_{s['uid']}_{rt_doc_id}"
+                            ):
+                                add_selected.append(s["uid"])
+                        if add_selected:
+                            if st.button(f"➕  Add {len(add_selected)} student(s) to roster",
+                                         type="primary", key="rt_add_sel"):
+                                new_roster = list(set(roster) | set(add_selected))
+                                rt_doc_ref.set({"roster": new_roster}, merge=True)
+                                st.success(f"Added {len(add_selected)} student(s)!")
+                                st.rerun()
+
+                    st.divider()
+
+                    # Option 2: Add ALL students at once
+                    c_all1, c_all2 = st.columns(2)
+                    if c_all1.button("➕  Add ALL students to roster",
+                                     use_container_width=True, key="rt_add_all"):
+                        all_uids = [s["uid"] for s in all_students]
+                        rt_doc_ref.set({"roster": all_uids}, merge=True)
+                        st.success(f"Added all {len(all_uids)} students!")
+                        st.rerun()
+                    if c_all2.button("🗑️  Clear entire roster",
+                                     use_container_width=True, key="rt_clear_roster"):
+                        rt_doc_ref.set({"roster": []}, merge=True)
+                        st.warning("Roster cleared.")
+                        st.rerun()
+
+                    # Option 3: CSV upload for roster
+                    st.divider()
+                    st.markdown("**Import roster from CSV** (column: `email`)")
+                    roster_csv = st.file_uploader("Upload roster CSV",
+                        type=["csv"], key="rt_roster_csv")
+                    if roster_csv and st.button("📥  Import roster from CSV",
+                                                key="rt_import_csv"):
+                        import io as _io, csv as _csv
+                        reader = _csv.DictReader(_io.StringIO(
+                            roster_csv.read().decode("utf-8-sig")))
+                        csv_emails = {row.get("email","").strip().lower()
+                                      for row in reader if row.get("email")}
+                        matched_uids = [
+                            s["uid"] for s in all_students
+                            if s.get("email","").lower() in csv_emails
+                        ]
+                        not_found = csv_emails - {
+                            s.get("email","").lower() for s in all_students
+                        }
+                        new_roster = list(set(roster) | set(matched_uids))
+                        rt_doc_ref.set({"roster": new_roster}, merge=True)
+                        st.success(f"✅  Added {len(matched_uids)} students from CSV!")
+                        if not_found:
+                            st.warning(f"⚠️  {len(not_found)} email(s) not found in system: "
+                                       f"{', '.join(list(not_found)[:5])}")
+                        st.rerun()
+
+                # ── rt2: Controls ────────────────────
+                with rt2:
+                    st.markdown("#### Exam Controls")
+
+                    badge_color = {"open":"#22C55E","closed":"#EF4444",
+                                   "not started":"#8898CC"}.get(status,"#8898CC")
+                    st.markdown(
+                        f"<div style='display:inline-flex;align-items:center;gap:8px;"
+                        f"background:#F8F9FF;border:1.5px solid #E8ECF8;border-radius:8px;"
+                        f"padding:8px 16px;margin-bottom:16px;'>"
+                        f"<span style='width:10px;height:10px;border-radius:50%;"
+                        f"background:{badge_color};display:inline-block;'></span>"
+                        f"<span style='font-weight:600;color:#1B2B6B;'>"
+                        f"Status: {status.upper()}</span></div>",
+                        unsafe_allow_html=True)
+                    if rt_data.get("opened_at"):
+                        st.caption(f"Opened: {rt_data['opened_at'].strftime('%d %b %Y %H:%M')}")
+                    if rt_data.get("closed_at"):
+                        st.caption(f"Closed: {rt_data['closed_at'].strftime('%d %b %Y %H:%M')}")
+
+                    # Roster summary
+                    if require_roster:
+                        st.info(f"🔒 Restricted to roster: **{len(roster)} student(s)** registered")
+                    else:
+                        st.info("🔓 Open to all students (no roster restriction)")
+
+                    c1,c2,c3 = st.columns(3)
+                    if c1.button("▶️  Open exam", type="primary", use_container_width=True):
+                        rt_doc_ref.set({
+                            "competition": sel_name,
+                            "status":      "open",
+                            "opened_at":   datetime.now(timezone.utc),
+                            "closed_at":   None,
+                        }, merge=True)
+                        st.success(f"✅  **{sel_name}** is now OPEN!")
+                        st.rerun()
+                    if c2.button("⏹️  Close exam", use_container_width=True):
+                        rt_doc_ref.set({
+                            "status":    "closed",
+                            "closed_at": datetime.now(timezone.utc),
+                        }, merge=True)
+                        st.warning(f"🔒  **{sel_name}** is now CLOSED.")
+                        st.rerun()
+                    if c3.button("🔄  Reset", use_container_width=True):
+                        rt_doc_ref.set({
+                            "competition":"not started",
+                            "status":     "not started",
+                            "opened_at":  None,
+                            "closed_at":  None,
+                        }, merge=True)
+                        st.info("Reset.")
+                        st.rerun()
+
+                    st.divider()
+                    app_url   = st.secrets.get("APP_URL","https://share.streamlit.io")
+                    share_url = f"{app_url}?comp={sel_name.replace(' ','+')}"
+                    st.markdown("**📎 Share this link with students:**")
+                    st.code(share_url, language=None)
+                    st.caption("Students click the link → login → waiting room → auto-enters when you open the exam")
+
+                # ── rt3: Live monitor ────────────────
+                with rt3:
+                    st.markdown("#### 🏆 Live Monitor")
+                    st.caption("Shows all roster students — submitted and waiting.")
+
+                    if st.button("🔄  Refresh", key="rt_refresh", type="primary"):
+                        st.session_state["rt_lb_show"] = True
+
+                    if st.session_state.get("rt_lb_show"):
+                        try:
+                            # Get all submissions for this competition
+                            submissions = {}
+                            for u in db.collection("users").stream():
+                                uid  = u.id
+                                prof = u.to_dict()
+                                if prof.get("role") == "admin": continue
+                                ss = list(
+                                    db.collection("users").document(uid)
+                                    .collection("exam_sessions")
+                                    .where("competition","==",sel_name)
+                                    .order_by("raw_score",
+                                              direction=firestore.Query.DESCENDING)
+                                    .limit(1).stream()
+                                )
+                                if ss:
+                                    s = ss[0].to_dict()
+                                    ts = s.get("timestamp_start")
+                                    submissions[uid] = {
+                                        "name":  prof.get("display_name","—"),
+                                        "email": prof.get("email","—"),
+                                        "score": s.get("raw_score",0),
+                                        "max":   s.get("max_score",0),
+                                        "pct":   s.get("pct",0),
+                                        "time":  ts.strftime("%H:%M:%S") if ts else "—",
+                                        "dur":   f"{s.get('duration_sec',0)//60}m "
+                                                 f"{s.get('duration_sec',0)%60}s",
+                                    }
+
+                            # Determine who to show
+                            if roster and require_roster:
+                                # Show roster students only
+                                roster_students = {
+                                    s["uid"]: s for s in all_students
+                                    if s["uid"] in roster_uids
+                                }
+                                submitted_uids = set(submissions.keys())
+                                waiting_uids   = roster_uids - submitted_uids
+
+                                submitted_list = sorted(
+                                    [submissions[uid] for uid in submitted_uids if uid in roster_uids],
+                                    key=lambda x:x["score"], reverse=True
+                                )
+                                waiting_list = [
+                                    roster_students[uid]
+                                    for uid in waiting_uids
+                                    if uid in roster_students
+                                ]
+                            else:
+                                # Show all who submitted
+                                submitted_list = sorted(
+                                    submissions.values(),
+                                    key=lambda x:x["score"], reverse=True
+                                )
+                                waiting_list = []
+
+                            # Summary
+                            sc1,sc2,sc3 = st.columns(3)
+                            sc1.metric("Submitted",  len(submitted_list))
+                            sc2.metric("Waiting",    len(waiting_list))
+                            sc3.metric("Total",      len(submitted_list)+len(waiting_list))
+
+                            # Submitted table
+                            if submitted_list:
+                                st.markdown("#### ✅ Submitted")
+                                h1,h2,h3,h4,h5,h6 = st.columns([1,3,2,2,2,2])
+                                for col,lbl in zip(
+                                    [h1,h2,h3,h4,h5,h6],
+                                    ["#","Name","Score","Accuracy","Time","Duration"]
+                                ):
+                                    col.markdown(f"**{lbl}**")
+                                st.divider()
+                                for rank,s in enumerate(submitted_list,1):
+                                    medal = ("🥇" if rank==1 else
+                                             "🥈" if rank==2 else
+                                             "🥉" if rank==3 else f"**{rank}**")
+                                    r1,r2,r3,r4,r5,r6 = st.columns([1,3,2,2,2,2])
+                                    r1.markdown(medal)
+                                    r2.markdown(f"**{s['name']}**")
+                                    r3.markdown(f"{s['score']} / {s['max']}")
+                                    pct_color = ("🟢" if s["pct"]>=70 else
+                                                 "🟡" if s["pct"]>=50 else "🔴")
+                                    r4.markdown(f"{pct_color} {s['pct']}%")
+                                    r5.markdown(s["time"])
+                                    r6.markdown(s["dur"])
+
+                            # Waiting table
+                            if waiting_list:
+                                st.divider()
+                                st.markdown(f"#### ⏳ Not yet submitted ({len(waiting_list)})")
+                                for s in waiting_list:
+                                    c1,c2 = st.columns([4,4])
+                                    c1.markdown(f"**{s.get('display_name','—')}**")
+                                    c2.caption(s.get("email","—"))
+
+                            if not submitted_list and not waiting_list:
+                                st.info("No submissions yet. Waiting for students…")
+
+                        except Exception as e:
+                            st.error(f"Monitor error: {e}")
 
     footer()
 
@@ -3341,6 +3510,29 @@ def page_realtime():
     except Exception as e:
         st.error(f"Error loading competition status: {e}")
         status = "not started"
+
+    # ── Roster check ──────────────────────────
+    require_roster = rt_data.get("require_roster", False)
+    roster         = rt_data.get("roster", [])
+    if require_roster and roster and uid not in roster:
+        topbar(comp_name)
+        st.markdown(f"""
+        <div class="mc-hero">
+          <div class="mc-hero-eyebrow">Realtime Competition</div>
+          <div class="mc-hero-title"><em>{comp_name}</em></div>
+        </div>
+        <div class="mc-body" style="text-align:center;padding:60px 28px;">
+          <div style="font-size:64px;margin-bottom:16px;">🚫</div>
+          <div style="font-family:'Fraunces',serif;font-size:26px;font-weight:300;
+                      color:#1B2B6B;margin-bottom:12px;">You are not registered for this competition</div>
+          <div style="font-size:15px;color:#8898CC;margin-bottom:24px;">
+            <strong>{name}</strong>, your account is not on the roster for <strong>{comp_name}</strong>.<br>
+            Please contact your administrator to be added.
+          </div>
+        </div>""", unsafe_allow_html=True)
+        if st.button("← Back to Dashboard"):
+            st.session_state["page"] = "dashboard"; st.rerun()
+        footer(); return
 
     topbar(comp_name)
 
