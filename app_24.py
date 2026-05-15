@@ -24,7 +24,7 @@ st.set_page_config(
     page_title="MathComp · Math Mission Thailand",
     page_icon="📐",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 # ══════════════════════════════════════════════
@@ -726,6 +726,21 @@ def page_dashboard():
     </div>
     <div class="mc-body">""", unsafe_allow_html=True)
 
+    # Admin shortcut banner — only visible to admin
+    if st.session_state.get("role") == "admin":
+        st.markdown("""
+        <div style="background:linear-gradient(135deg,#1B2B6B,#243580);border-radius:12px;
+                    padding:16px 24px;margin-bottom:20px;display:flex;align-items:center;gap:16px;">
+          <span style="font-size:28px;">⚙️</span>
+          <div style="flex:1;">
+            <div style="font-size:14px;font-weight:600;color:#fff;margin-bottom:2px;">Admin Panel</div>
+            <div style="font-size:12px;color:rgba(255,255,255,.5);">Import questions · Manage members · Competition settings</div>
+          </div>
+        </div>""", unsafe_allow_html=True)
+        if st.button("Open Admin Panel →", type="primary", key="admin_shortcut"):
+            st.session_state["page"] = "admin"; st.rerun()
+        st.divider()
+
     st.markdown('<span class="mc-section-lbl">Start a new exam</span>', unsafe_allow_html=True)
     st.markdown('<div class="mc-card">', unsafe_allow_html=True)
     ca, cb = st.columns(2)
@@ -1233,7 +1248,7 @@ def page_admin():
     # ── Tab 3: Members ─────────────────────────
     with tab3:
         st.subheader("Member Management")
-        mem1,mem2,mem3 = st.tabs(["👥  All Members","➕  Add Member","📊  Export"])
+        mem1,mem2,mem_csv,mem3 = st.tabs(["👥  All Members","➕  Add Member","📤  Bulk CSV Upload","📊  Export"])
 
         with mem1:
             if st.button("🔄  Load members", key="load_members"):
@@ -1273,6 +1288,66 @@ def page_admin():
                         db.collection("users").document(user.uid).set({"display_name":nm,"email":ne,"role":nr,"created_at":datetime.now(timezone.utc)})
                         st.success(f"✅  Account created for **{nm}** as **{nr}**")
                     except Exception as e: st.error(f"Error: {e}")
+
+        with mem_csv:
+            st.markdown("#### Bulk create accounts from CSV")
+            st.caption("Upload a CSV file with columns: **display_name, email, password, role**")
+            st.markdown("""
+**CSV format example:**
+```
+display_name,email,password,role
+Napat Suwan,napat@example.com,Pass1234!,student
+Mint Charoenpol,mint@example.com,Pass5678!,student
+Admin2,admin2@example.com,AdminPass!,admin
+```
+""")
+            csv_template = "display_name,email,password,role\nNapat Suwan,napat@example.com,Pass1234!,student\nMint Charoenpol,mint@example.com,Pass5678!,student"
+            st.download_button("⬇️  Download CSV template", csv_template.encode(), "members_template.csv", "text/csv")
+            st.divider()
+            csv_file = st.file_uploader("Upload members CSV", type=["csv"], key="bulk_csv")
+            if csv_file:
+                import io as _io
+                import csv as _csv
+                rows = list(_csv.DictReader(_io.StringIO(csv_file.read().decode("utf-8-sig"))))
+                st.markdown(f"**{len(rows)} accounts found in CSV — preview:**")
+                for i,r in enumerate(rows[:5]):
+                    st.markdown(f"`{r.get('display_name','?')}` · `{r.get('email','?')}` · role: `{r.get('role','student')}`")
+                if len(rows) > 5: st.caption(f"… and {len(rows)-5} more")
+                st.divider()
+                if st.button(f"🚀  Create {len(rows)} accounts", type="primary", key="bulk_create"):
+                    from firebase_admin import auth as _fb_auth
+                    success, failed = 0, []
+                    prog = st.progress(0, text="Creating accounts…")
+                    for i,r in enumerate(rows):
+                        name  = r.get("display_name","").strip()
+                        email = r.get("email","").strip()
+                        pwd   = r.get("password","").strip()
+                        role  = r.get("role","student").strip().lower()
+                        if not name or not email or not pwd:
+                            failed.append(f"{email} — missing fields"); continue
+                        try:
+                            user = _fb_auth.create_user(email=email, password=pwd, display_name=name)
+                            db.collection("users").document(user.uid).set({
+                                "display_name": name, "email": email,
+                                "role": role, "created_at": datetime.now(timezone.utc)
+                            })
+                            success += 1
+                        except Exception as e:
+                            failed.append(f"{email} — {e}")
+                        prog.progress((i+1)/len(rows), text=f"Creating accounts… {i+1}/{len(rows)}")
+                    prog.empty()
+                    st.success(f"✅  {success} accounts created successfully!")
+                    if failed:
+                        st.warning(f"⚠️  {len(failed)} failed:")
+                        for f in failed: st.caption(f"  • {f}")
+                    # Generate summary CSV
+                    summary = "display_name,email,role,status\n"
+                    for r in rows:
+                        email = r.get("email","")
+                        status = "failed" if any(email in f for f in failed) else "created"
+                        summary += f"{r.get('display_name','')},{email},{r.get('role','student')},{status}\n"
+                    st.download_button("⬇️  Download result summary", summary.encode(),
+                                       f"bulk_create_result_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", "text/csv")
 
         with mem3:
             st.markdown("#### Export student data")
