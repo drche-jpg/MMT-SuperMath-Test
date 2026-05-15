@@ -507,7 +507,8 @@ db = init_firebase()
 # ══════════════════════════════════════════════
 TOPICS = ["Algebra", "Number Theory", "Geometry", "Combinatorics", "Word Problem"]
 
-COMPETITIONS = {
+# Built-in competitions (hardcoded)
+COMPETITIONS_BUILTIN = {
     "AMC 8":  {"levels":["AMC 8"],              "secs_per_q":90,  "scoring":{"correct":1,"wrong":0,"blank":0},     "description":"Grade 6–8 · 25 questions · 40 min"},
     "AMC 10": {"levels":["AMC 10A","AMC 10B"],   "secs_per_q":150, "scoring":{"correct":6,"wrong":-1.5,"blank":0},  "description":"Grade 9–10 · 30 questions · 75 min"},
     "AMC 12": {"levels":["AMC 12A","AMC 12B"],   "secs_per_q":150, "scoring":{"correct":6,"wrong":-1.5,"blank":0},  "description":"Grade 11–12 · 30 questions · 75 min"},
@@ -515,7 +516,79 @@ COMPETITIONS = {
     "Sansu Olympic":    {"levels":["Kidbee","Junior","Senior","Hironaka"],     "secs_per_q":180,"scoring":{"correct":1,"wrong":0,"blank":0},"description":"算数オリンピック"},
     "Math Association Thailand": {"levels":["Primary Upper","Junior Secondary","Senior Secondary"],"secs_per_q":120,"scoring":{"correct":1,"wrong":0,"blank":0},"description":"สมาคมคณิตศาสตร์แห่งประเทศไทย"},
     "POSN Mathematics": {"levels":["Round 1"],"secs_per_q":180,"scoring":{"correct":1,"wrong":0,"blank":0},"description":"สอวน. คณิตศาสตร์ รอบแรก"},
+    # Singapore
+    "SMO (Junior)":        {"levels":["Open","Short List"],         "secs_per_q":180,"scoring":{"correct":1,"wrong":0,"blank":0},"description":"Singapore Mathematical Olympiad · Junior"},
+    "SMO (Senior)":        {"levels":["Open","Short List"],         "secs_per_q":180,"scoring":{"correct":1,"wrong":0,"blank":0},"description":"Singapore Mathematical Olympiad · Senior"},
+    "SMO (Open)":          {"levels":["Open","Short List"],         "secs_per_q":180,"scoring":{"correct":1,"wrong":0,"blank":0},"description":"Singapore Mathematical Olympiad · Open"},
+    # International
+    "IMO":                 {"levels":["Day 1","Day 2"],             "secs_per_q":600,"scoring":{"correct":7,"wrong":0,"blank":0},"description":"International Mathematical Olympiad"},
+    "APMO":                {"levels":["General"],                   "secs_per_q":480,"scoring":{"correct":7,"wrong":0,"blank":0},"description":"Asian Pacific Mathematics Olympiad"},
+    "SASMO":               {"levels":["Grade 2","Grade 3","Grade 4","Grade 5","Grade 6","Grade 7","Grade 8","Grade 9","Grade 10"], "secs_per_q":90,"scoring":{"correct":4,"wrong":-1,"blank":0},"description":"Singapore & Asian Schools Math Olympiad"},
+    "SEAMO":               {"levels":["Paper A","Paper B","Paper C","Paper D","Paper E","Paper F"], "secs_per_q":90,"scoring":{"correct":1,"wrong":0,"blank":0},"description":"South East Asian Mathematical Olympiad"},
+    "Thailand ONET":       {"levels":["Grade 6","Grade 9","Grade 12"],"secs_per_q":90,"scoring":{"correct":1,"wrong":0,"blank":0},"description":"O-NET คณิตศาสตร์"},
+    "Thailand PAT":        {"levels":["PAT 1"],                     "secs_per_q":120,"scoring":{"correct":1,"wrong":0,"blank":0},"description":"PAT 1 คณิตศาสตร์"},
 }
+
+@st.cache_data(ttl=60)
+def load_custom_competitions() -> dict:
+    """Load admin-created competitions from Firestore."""
+    try:
+        docs = db.collection("competition_catalog").stream()
+        result = {}
+        for doc in docs:
+            d = doc.to_dict()
+            name = d.get("name","")
+            if name:
+                result[name] = {
+                    "levels":      d.get("levels",["General"]),
+                    "secs_per_q":  d.get("secs_per_q",120),
+                    "scoring":     d.get("scoring",{"correct":1,"wrong":0,"blank":0}),
+                    "description": d.get("description","Custom competition"),
+                    "custom":      True,
+                    "doc_id":      doc.id,
+                }
+        return result
+    except:
+        return {}
+
+@st.cache_data(ttl=30)
+def load_disabled_competitions() -> set:
+    """Return set of competition names that admin has disabled."""
+    try:
+        doc = db.collection("platform_settings").document("disabled_competitions").get()
+        if doc.exists:
+            return set(doc.to_dict().get("disabled", []))
+    except:
+        pass
+    return set()
+
+def set_competition_enabled(name: str, enabled: bool):
+    """Enable or disable a competition."""
+    disabled = load_disabled_competitions()
+    if enabled:
+        disabled.discard(name)
+    else:
+        disabled.add(name)
+    db.collection("platform_settings").document("disabled_competitions").set(
+        {"disabled": list(disabled)}
+    )
+    load_disabled_competitions.clear()
+
+def get_all_competitions(include_disabled: bool = False) -> dict:
+    """
+    Merge built-in + custom competitions.
+    include_disabled=True  → admin views (show all)
+    include_disabled=False → student views (hide disabled)
+    """
+    merged = dict(COMPETITIONS_BUILTIN)
+    merged.update(load_custom_competitions())
+    if not include_disabled:
+        disabled = load_disabled_competitions()
+        merged = {k: v for k, v in merged.items() if k not in disabled}
+    return merged
+
+# Active competitions dict (used throughout the app)
+COMPETITIONS = COMPETITIONS_BUILTIN  # fallback; replaced at runtime by get_all_competitions()
 DIFFICULTY_OPTIONS = ["Easy","Intermediate","Advanced","Mixed"]
 
 DEFAULT_SETTINGS = {
@@ -795,7 +868,7 @@ def save_question(doc: dict):
 # Scoring
 # ══════════════════════════════════════════════
 def compute_score(competition, questions, answers) -> dict:
-    rules = COMPETITIONS.get(competition,{}).get("scoring",{"correct":1,"wrong":0,"blank":0})
+    rules = get_all_competitions().get(competition,{}).get("scoring",{"correct":1,"wrong":0,"blank":0})
     raw = max_s = 0.0
     tbd = {t:{"correct":0,"total":0} for t in TOPICS+["Other"]}
     pqs = []
@@ -1052,10 +1125,10 @@ def page_dashboard():
     with ca:
         # Pre-fill from direct competition URL
         default_comp = st.session_state.pop("_prefill_comp","") if "_prefill_comp" in st.session_state else None
-        comp_keys    = list(COMPETITIONS.keys())
+        comp_keys    = list(get_all_competitions().keys())
         comp_idx     = comp_keys.index(default_comp) if default_comp and default_comp in comp_keys else 0
         competition  = st.selectbox("Competition", comp_keys, index=comp_idx)
-        comp_info   = COMPETITIONS[competition]
+        comp_info   = get_all_competitions()[competition]
         st.caption(comp_info["description"])
         level = st.selectbox("Level / Division", comp_info["levels"])
     with cb:
@@ -1390,7 +1463,7 @@ def page_admin():
     # ── Tab 1: Settings ────────────────────────
     with tab1:
         st.subheader("Competition Settings")
-        competition = st.selectbox("Select competition to configure", list(COMPETITIONS.keys()), key="adm_comp")
+        competition = st.selectbox("Select competition to configure", list(get_all_competitions(include_disabled=True).keys()), key="adm_comp")
         settings    = load_settings(competition)
         st.divider()
         st.markdown("#### ⚙️  Behavior Settings")
@@ -1457,13 +1530,86 @@ def page_admin():
             horizontal=True, key="import_method")
         st.divider()
 
-        def meta_fields(p=""):
-            c1,c2,c3,c4 = st.columns(4)
-            comp  = c1.selectbox("Competition",list(COMPETITIONS.keys()),key=f"{p}comp")
-            level = c2.selectbox("Level",COMPETITIONS[comp]["levels"],key=f"{p}level")
-            topic = c3.selectbox("Topic",TOPICS+["Other"],key=f"{p}topic")
-            diff  = c4.selectbox("Difficulty",["easy","intermediate","advanced"],key=f"{p}diff")
-            c5,c6 = st.columns(2)
+        # ── AI difficulty + topic assessor ──────
+        def ai_assess_question(q_text:str="", img_b64:str="", img_mime:str="", competition:str="") -> dict:
+            """Ask Claude to identify difficulty and topic for a question."""
+            api_key = st.secrets.get("ANTHROPIC_API_KEY","")
+            if not api_key:
+                return {}
+            content_parts = []
+            if img_b64:
+                content_parts.append({"type":"image","source":{"type":"base64","media_type":img_mime,"data":img_b64}})
+            if q_text:
+                content_parts.append({"type":"text","text":q_text})
+            content_parts.append({"type":"text","text":
+                f"""You are an expert mathematics competition coach.
+Analyse this mathematics competition question for {competition or "a math competition"}.
+
+Respond ONLY with a JSON object (no markdown, no explanation) with exactly these fields:
+{{
+  "difficulty": "easy" | "intermediate" | "advanced",
+  "topic": "Algebra" | "Number Theory" | "Geometry" | "Combinatorics" | "Word Problem" | "Other",
+  "difficulty_reason": "one sentence explaining why",
+  "topic_reason": "one sentence explaining why"
+}}"""
+            })
+            try:
+                resp = requests.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={"Content-Type":"application/json",
+                             "x-api-key":api_key,
+                             "anthropic-version":"2023-06-01"},
+                    json={"model":"claude-sonnet-4-5","max_tokens":200,
+                          "messages":[{"role":"user","content":content_parts}]},
+                    timeout=20,
+                )
+                if resp.ok:
+                    raw = resp.json()["content"][0]["text"].strip()
+                    raw = raw.replace("```json","").replace("```","").strip()
+                    return json.loads(raw)
+            except Exception as e:
+                st.warning(f"AI assessment error: {e}")
+            return {}
+
+        def meta_fields(p="", q_text_for_ai="", img_b64_for_ai="", img_mime_for_ai=""):
+            c1,c2 = st.columns(2)
+            comp  = c1.selectbox("Competition",list(get_all_competitions(include_disabled=True).keys()),key=f"{p}comp")
+            level = c2.selectbox("Level",get_all_competitions().get(comp,{}).get("levels",["General"]),key=f"{p}level")
+
+            # AI assess button
+            ai_result = st.session_state.get(f"{p}ai_assess",{})
+            ai_col1, ai_col2 = st.columns([3,1])
+            with ai_col2:
+                if st.button("🤖 AI assess difficulty & topic", key=f"{p}ai_btn", use_container_width=True):
+                    with st.spinner("Claude is analysing the question…"):
+                        result = ai_assess_question(q_text_for_ai, img_b64_for_ai, img_mime_for_ai, comp)
+                        if result:
+                            st.session_state[f"{p}ai_assess"] = result
+                            st.rerun()
+                        else:
+                            st.warning("AI assessment unavailable — fill in manually.")
+            with ai_col1:
+                if ai_result:
+                    st.markdown(
+                        f"<div style='background:#EEF3FF;border:1px solid #C8D8FF;border-radius:8px;"
+                        f"padding:8px 14px;font-size:13px;'>"
+                        f"🤖 AI suggests: <strong>Topic — {ai_result.get('topic','?')}</strong> · "
+                        f"<strong>Difficulty — {ai_result.get('difficulty','?')}</strong><br>"
+                        f"<span style='color:#8898CC;font-size:11px;'>{ai_result.get('topic_reason','')} "
+                        f"· {ai_result.get('difficulty_reason','')}</span></div>",
+                        unsafe_allow_html=True)
+
+            c3,c4,c5,c6 = st.columns(4)
+            # Use AI suggestion as default if available
+            ai_topic = ai_result.get("topic","Algebra")
+            ai_diff  = ai_result.get("difficulty","easy")
+            topic_opts = TOPICS+["Other"]
+            diff_opts  = ["easy","intermediate","advanced"]
+            t_idx = topic_opts.index(ai_topic) if ai_topic in topic_opts else 0
+            d_idx = diff_opts.index(ai_diff)   if ai_diff  in diff_opts  else 0
+
+            topic = c3.selectbox("Topic",    topic_opts, index=t_idx, key=f"{p}topic")
+            diff  = c4.selectbox("Difficulty",diff_opts, index=d_idx, key=f"{p}diff")
             year  = c5.number_input("Year",2000,2030,datetime.now().year,key=f"{p}year")
             atype = c6.selectbox("Answer type",["mc4","mc5","integer","decimal"],key=f"{p}atype")
             return comp,level,topic,diff,int(year),atype
@@ -1490,7 +1636,8 @@ def page_admin():
         if method == "✏️  Type directly":
             st.markdown("#### Type question with LaTeX support")
             st.caption("Use `$...$` for inline math and `$$...$$` for display math.")
-            comp,level,topic,diff,year,atype = meta_fields("t_")
+            q_text_pre = st.session_state.get('t_qtext','')
+            comp,level,topic,diff,year,atype = meta_fields("t_",q_text_for_ai=q_text_pre)
             q_text = st.text_area("Question text (LaTeX supported)", height=120, key="t_qtext")
             q_img  = st.file_uploader("Question figure (optional)", type=["png","jpg","jpeg"], key="t_qimg")
             if q_text:
@@ -1530,7 +1677,17 @@ def page_admin():
         # Method 3 — AI-OCR
         elif method == "🤖  AI-OCR from image":
             st.markdown("#### AI reads image → LaTeX")
-            comp,level,topic,diff,year,atype = meta_fields("ai_")
+            ai_img_pre = st.session_state.get('ai_qimg')
+            ai_b64_pre,ai_mime_pre = ("","")
+            if ai_img_pre:
+                try:
+                    ai_img_pre.seek(0)
+                    ai_b64_pre = base64.b64encode(ai_img_pre.read()).decode()
+                    ai_mime_pre = "image/jpeg" if ai_img_pre.name.lower().endswith(('jpg','jpeg')) else f"image/{ai_img_pre.name.split('.')[-1]}"
+                    ai_img_pre.seek(0)
+                except: pass
+            ai_txt_pre = st.session_state.get('ai_qtext','')
+            comp,level,topic,diff,year,atype = meta_fields("ai_",q_text_for_ai=ai_txt_pre,img_b64_for_ai=ai_b64_pre,img_mime_for_ai=ai_mime_pre)
             q_img = st.file_uploader("Question image", type=["png","jpg","jpeg"], key="ai_qimg")
             if q_img: st.image(q_img, caption="Uploaded", use_container_width=True)
             if q_img and st.button("🤖  Run AI-OCR", key="ai_ocr"):
@@ -1622,29 +1779,168 @@ def page_admin():
                     st.session_state.pop("pdf_questions",None)
                     st.success(f"✅  {len(pdf_qs)} questions saved!")
 
-        # Browser
+        # ── Question Bank Browser (Editable) ───────
         st.divider()
-        st.markdown("#### 📚  Question Bank Browser")
-        qb_comp  = st.selectbox("Filter competition",["All"]+list(COMPETITIONS.keys()),key="qb_comp")
-        qb_topic = st.selectbox("Filter topic",["All"]+TOPICS+["Other"],key="qb_topic")
-        if st.button("🔍  Browse", key="qb_browse"):
+        st.markdown("#### 📚  Question Bank — Browse & Edit")
+        f1,f2,f3 = st.columns(3)
+        qb_comp  = f1.selectbox("Filter competition", ["All"]+list(COMPETITIONS.keys()), key="qb_comp")
+        qb_topic = f2.selectbox("Filter topic",       ["All"]+TOPICS+["Other"],          key="qb_topic")
+        qb_diff  = f3.selectbox("Filter difficulty",  ["All","easy","intermediate","advanced"], key="qb_diff")
+
+        if st.button("🔍  Browse questions", key="qb_browse", type="primary"):
             try:
                 ref = db.collection("questions")
-                if qb_comp!="All":  ref=ref.where("competition","==",qb_comp)
-                if qb_topic!="All": ref=ref.where("topic","==",qb_topic)
-                docs = list(ref.limit(50).stream())
-                if docs:
-                    st.caption(f"{len(docs)} questions found (max 50)")
-                    for doc in docs:
-                        d=doc.to_dict(); qt=d.get("question_text","(image only)")[:80]
-                        with st.expander(f"[{d.get('competition','')}] [{d.get('difficulty','')}] {d.get('topic','')} — {qt}…"):
-                            if d.get("question_image_url"): st.image(d["question_image_url"],use_container_width=True)
-                            if d.get("question_text"):      st.markdown(d["question_text"])
-                            st.caption(f"Answer type: {d.get('answer_type','')} · Correct: {d.get('correct_answer','')} · Year: {d.get('year','')}")
-                            if st.button("🗑️  Delete",key=f"del_{doc.id}"):
-                                db.collection("questions").document(doc.id).delete(); st.rerun()
-                else: st.info("No questions found.")
-            except Exception as e: st.error(f"Error: {e}")
+                if qb_comp  != "All": ref = ref.where("competition","==",qb_comp)
+                if qb_topic != "All": ref = ref.where("topic","==",qb_topic)
+                if qb_diff  != "All": ref = ref.where("difficulty","==",qb_diff)
+                docs = list(ref.limit(100).stream())
+                st.session_state["qb_docs"] = [(doc.id, doc.to_dict()) for doc in docs]
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+        qb_docs = st.session_state.get("qb_docs", [])
+        if qb_docs:
+            st.caption(f"**{len(qb_docs)} questions found** (max 100) — expand any to edit and save")
+            for doc_id, d in qb_docs:
+                qt  = d.get("question_text","(image only)")[:70]
+                hdr = (f"[{d.get('competition','')}] "
+                       f"[{d.get('level','')}] "
+                       f"[{d.get('difficulty','')}] "
+                       f"[{d.get('topic','')}] — {qt}…")
+                with st.expander(hdr):
+                    # ── Preview ──────────────────────────────
+                    if d.get("question_image_url"):
+                        st.image(d["question_image_url"], use_container_width=True)
+
+                    ec1, ec2 = st.columns(2)
+                    # ── Editable fields ───────────────────────
+                    new_comp  = ec1.selectbox("Competition", list(COMPETITIONS.keys()),
+                        index=list(COMPETITIONS.keys()).index(d.get("competition","AMC 8"))
+                              if d.get("competition") in COMPETITIONS else 0,
+                        key=f"e_comp_{doc_id}")
+                    new_level = ec2.selectbox("Level", COMPETITIONS[new_comp]["levels"],
+                        index=COMPETITIONS[new_comp]["levels"].index(d.get("level",""))
+                              if d.get("level","") in COMPETITIONS[new_comp]["levels"] else 0,
+                        key=f"e_level_{doc_id}")
+
+                    ec3,ec4,ec5,ec6 = st.columns(4)
+                    topic_opts = TOPICS+["Other"]
+                    diff_opts  = ["easy","intermediate","advanced"]
+                    new_topic = ec3.selectbox("Topic", topic_opts,
+                        index=topic_opts.index(d.get("topic","Other"))
+                              if d.get("topic") in topic_opts else 0,
+                        key=f"e_topic_{doc_id}")
+                    new_diff  = ec4.selectbox("Difficulty", diff_opts,
+                        index=diff_opts.index(d.get("difficulty","easy"))
+                              if d.get("difficulty") in diff_opts else 0,
+                        key=f"e_diff_{doc_id}")
+                    new_year  = ec5.number_input("Year", 2000, 2030,
+                        value=int(d.get("year", datetime.now().year)),
+                        key=f"e_year_{doc_id}")
+                    atype_opts = ["mc4","mc5","integer","decimal"]
+                    new_atype = ec6.selectbox("Answer type", atype_opts,
+                        index=atype_opts.index(d.get("answer_type","mc4"))
+                              if d.get("answer_type") in atype_opts else 0,
+                        key=f"e_atype_{doc_id}")
+
+                    new_qtext = st.text_area("Question text (LaTeX)",
+                        value=d.get("question_text",""), height=100,
+                        key=f"e_qtext_{doc_id}")
+
+                    # Choices
+                    new_choices = d.get("choices",[])
+                    new_correct = d.get("correct_answer","")
+                    if new_atype in ("mc4","mc5"):
+                        n = 4 if new_atype=="mc4" else 5
+                        st.markdown("**Answer choices**")
+                        ch_cols = st.columns(n)
+                        new_choices = []
+                        for i in range(n):
+                            existing_val = d.get("choices",[""]*(n))[i] if i < len(d.get("choices",[])) else ""
+                            new_choices.append(ch_cols[i].text_input(
+                                chr(65+i), value=existing_val, key=f"e_ch_{doc_id}_{i}"))
+                        new_correct = st.selectbox("Correct answer",
+                            [chr(65+i) for i in range(n)],
+                            index=[chr(65+i) for i in range(n)].index(d.get("correct_answer","A"))
+                                  if d.get("correct_answer","A") in [chr(65+i) for i in range(n)] else 0,
+                            key=f"e_correct_{doc_id}")
+                    else:
+                        new_correct = st.text_input("Correct answer",
+                            value=str(d.get("correct_answer","")),
+                            key=f"e_correct_{doc_id}")
+
+                    st.markdown("**Solution**")
+                    esl1, esl2 = st.columns(2)
+                    new_sol = esl1.text_area("Solution text / LaTeX",
+                        value=d.get("solution_text",""), height=80,
+                        key=f"e_sol_{doc_id}")
+                    new_sol_img_file = esl2.file_uploader(
+                        "Replace solution image",
+                        type=["png","jpg","jpeg"], key=f"e_sol_img_{doc_id}")
+                    if d.get("solution_image_url") and not new_sol_img_file:
+                        st.image(d["solution_image_url"], caption="Current solution image", width=200)
+                    elif new_sol_img_file:
+                        st.image(new_sol_img_file, caption="New solution image preview", width=200)
+
+                    # ── AI re-assess button ───────────────────
+                    ai_key = f"e_ai_{doc_id}"
+                    if st.button("🤖  AI re-assess difficulty & topic", key=f"e_ai_btn_{doc_id}"):
+                        with st.spinner("Claude is re-analysing…"):
+                            ai_r = ai_assess_question(new_qtext, "", "", new_comp)
+                            if ai_r:
+                                st.session_state[ai_key] = ai_r
+                                st.rerun()
+                    if ai_key in st.session_state:
+                        ar = st.session_state[ai_key]
+                        st.info(
+                            f"🤖 AI suggests — **Topic: {ar.get('topic','?')}** · "
+                            f"**Difficulty: {ar.get('difficulty','?')}** · "
+                            f"{ar.get('topic_reason','')} · {ar.get('difficulty_reason','')}"
+                        )
+
+                    # ── Save / Delete buttons ─────────────────
+                    sb1, sb2 = st.columns(2)
+                    if sb1.button("💾  Save changes", type="primary",
+                                  key=f"save_{doc_id}", use_container_width=True):
+                        # Use AI suggestion if available
+                        ar = st.session_state.get(ai_key, {})
+                        final_topic = ar.get("topic", new_topic) if ar else new_topic
+                        final_diff  = ar.get("difficulty", new_diff) if ar else new_diff
+                        ts_now = datetime.now().timestamp()
+                        new_sol_url = d.get("solution_image_url","")
+                        if new_sol_img_file:
+                            new_sol_url = upload_img(
+                                new_sol_img_file,
+                                f"solutions/{ts_now}_s.{new_sol_img_file.name.split('.')[-1]}"
+                            )
+                        updates = {
+                            "competition":        new_comp,
+                            "level":              new_level,
+                            "topic":              final_topic,
+                            "difficulty":         final_diff,
+                            "year":               int(new_year),
+                            "answer_type":        new_atype,
+                            "question_text":      new_qtext,
+                            "choices":            new_choices,
+                            "correct_answer":     str(new_correct),
+                            "solution_text":      new_sol,
+                            "solution_image_url": new_sol_url,
+                        }
+                        db.collection("questions").document(doc_id).update(updates)
+                        # Refresh cache
+                        idx = next((i for i,(did,_) in enumerate(qb_docs) if did==doc_id), None)
+                        if idx is not None:
+                            st.session_state["qb_docs"][idx] = (doc_id, {**d, **updates})
+                        st.success("✅  Question updated!")
+                        st.rerun()
+
+                    if sb2.button("🗑️  Delete", key=f"del_{doc_id}", use_container_width=True):
+                        db.collection("questions").document(doc_id).delete()
+                        st.session_state["qb_docs"] = [(did,dd) for did,dd in qb_docs if did!=doc_id]
+                        st.warning("Question deleted.")
+                        st.rerun()
+        elif "qb_docs" in st.session_state:
+            st.info("No questions found for this filter.")
 
     # ── Tab 3: Members ─────────────────────────
     with tab3:
@@ -1829,27 +2125,317 @@ Admin2,admin2@example.com,AdminPass!,admin
     # ── Tab 4: Competitions ────────────────────
     with tab4:
         st.subheader("Competition Management")
-        ct1,ct2 = st.tabs(["🏆  Create","⚡  Realtime"])
+        ct1,ct2,ct3,ct4,ct5 = st.tabs([
+            "➕  Add Competition",
+            "✅  Enable / Disable",
+            "📝  Edit / Delete",
+            "🔗  Add Questions",
+            "⚡  Realtime Contest",
+        ])
 
+        # ── ct1: Add new competition ──────────────
         with ct1:
-            st.markdown("#### Create custom competition")
-            with st.form("create_comp"):
-                c1,c2=st.columns(2); cname=c1.text_input("Name"); ccode=c2.text_input("Code")
-                c3,c4=st.columns(2); cdate=c3.date_input("Date"); cdur=c4.number_input("Duration (min)",10,300,60)
-                c5,c6=st.columns(2); cq=c5.number_input("Questions",5,50,20); cpass=c6.text_input("Access code (optional)")
-                ccomps=st.multiselect("Pull from competitions",list(COMPETITIONS.keys()))
-                cdiff=st.selectbox("Difficulty",["Easy","Intermediate","Advanced","Mixed"])
-                sub_c=st.form_submit_button("Create",type="primary",use_container_width=True)
-            if sub_c:
-                if not cname or not ccode: st.error("Name and code required.")
-                else:
-                    try:
-                        db.collection("custom_competitions").document(ccode).set({"name":cname,"code":ccode,"date":str(cdate),"duration_min":int(cdur),"num_questions":int(cq),"access_code":cpass,"source_competitions":ccomps,"difficulty":cdiff,"created_at":datetime.now(timezone.utc),"status":"draft"})
-                        st.success(f"✅  **{cname}** created! Code: `{ccode}`")
-                        st.info(f"Share link: `?competition={ccode}`")
-                    except Exception as e: st.error(f"Error: {e}")
+            st.markdown("#### Add a new competition to the catalog")
+            st.caption("Once added, it will appear in the student exam selection dropdown.")
 
+            with st.form("add_comp_catalog"):
+                c1,c2 = st.columns(2)
+                cn_name = c1.text_input("Competition name *", placeholder="e.g. Singapore Mathematical Olympiad")
+                cn_code = c2.text_input("Short code *", placeholder="e.g. SMO_Junior")
+                cn_desc = st.text_input("Description", placeholder="e.g. Junior level · 35 questions · 90 min")
+
+                c3,c4,c5 = st.columns(3)
+                cn_spq   = c3.number_input("Seconds per question", 30, 600, 120, step=10)
+                cn_score_c = c4.number_input("Score correct",  0.0, 10.0, 1.0, step=0.5)
+                cn_score_w = c5.number_input("Score wrong (negative = penalty)", -5.0, 0.0, 0.0, step=0.5)
+
+                st.markdown("**Levels / Divisions** (one per line)")
+                cn_levels_raw = st.text_area("Levels", value="Junior\nSenior\nOpen", height=80)
+
+                sub_cn = st.form_submit_button("➕  Add to catalog", type="primary", use_container_width=True)
+
+            if sub_cn:
+                if not cn_name or not cn_code:
+                    st.error("Name and code are required.")
+                else:
+                    levels = [l.strip() for l in cn_levels_raw.strip().splitlines() if l.strip()]
+                    if not levels: levels = ["General"]
+                    try:
+                        db.collection("competition_catalog").document(cn_code).set({
+                            "name":       cn_name,
+                            "code":       cn_code,
+                            "description":cn_desc,
+                            "levels":     levels,
+                            "secs_per_q": int(cn_spq),
+                            "scoring":    {"correct":cn_score_c,"wrong":cn_score_w,"blank":0},
+                            "created_at": datetime.now(timezone.utc),
+                        })
+                        load_custom_competitions.clear()  # clear cache
+                        st.success(f"✅  **{cn_name}** added to catalog!")
+                        st.info(f"Students can now select it from the exam dropdown. "
+                                f"Add questions via the **🔗 Add Questions** tab.")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+            # Show pre-built suggestions
+            st.divider()
+            st.markdown("#### 💡 Quick-add popular competitions")
+            SUGGESTIONS = [
+                ("SMO Junior",       "SMO_Junior",    "Singapore Mathematical Olympiad · Junior",         ["Open","Short List"],          180, 1, 0),
+                ("SMO Senior",       "SMO_Senior",    "Singapore Mathematical Olympiad · Senior",         ["Open","Short List"],          180, 1, 0),
+                ("SMO Open",         "SMO_Open",      "Singapore Mathematical Olympiad · Open",           ["Open","Short List"],          180, 1, 0),
+                ("IMO",              "IMO",           "International Mathematical Olympiad",              ["Day 1","Day 2"],              600, 7, 0),
+                ("APMO",             "APMO",          "Asian Pacific Mathematics Olympiad",               ["General"],                    480, 7, 0),
+                ("SASMO",            "SASMO",         "Singapore & Asian Schools Math Olympiad",          ["Grade 2","Grade 3","Grade 4","Grade 5","Grade 6","Grade 7","Grade 8","Grade 9","Grade 10"], 90, 4, -1),
+                ("SEAMO",            "SEAMO",         "South East Asian Mathematical Olympiad",           ["Paper A","Paper B","Paper C","Paper D","Paper E","Paper F"], 90, 1, 0),
+                ("Thailand ONET",    "ONET",          "O-NET คณิตศาสตร์",                                 ["Grade 6","Grade 9","Grade 12"], 90, 1, 0),
+                ("Thailand PAT 1",   "PAT1",          "PAT 1 คณิตศาสตร์",                                ["PAT 1"],                      120, 1, 0),
+                ("Kangaroo Math",    "KANGAROO",      "Math Kangaroo / Känguru der Mathematik",           ["Pre-Ecolier","Ecolier","Benjamin","Cadet","Junior","Student"], 90, 1, 0),
+                ("IMAS",             "IMAS",          "International Mathematics Assessment for Schools", ["Grade 2-4","Grade 5-6","Grade 7-8"], 90, 1, 0),
+                ("HIMCM",            "HIMCM",         "High School Mathematical Contest in Modeling",     ["General"],                    300, 1, 0),
+            ]
+            existing_codes = set()
+            try:
+                existing_codes = {d.id for d in db.collection("competition_catalog").stream()}
+            except: pass
+
+            cols = st.columns(3)
+            for i, (name,code,desc,levels,spq,sc,sw) in enumerate(SUGGESTIONS):
+                with cols[i%3]:
+                    already = code in existing_codes
+                    btn_label = f"✅ {name}" if already else f"➕ {name}"
+                    if st.button(btn_label, key=f"qa_{code}",
+                                 use_container_width=True, disabled=already):
+                        try:
+                            db.collection("competition_catalog").document(code).set({
+                                "name":cn_name if False else name,"code":code,"description":desc,
+                                "levels":levels,"secs_per_q":spq,
+                                "scoring":{"correct":sc,"wrong":sw,"blank":0},
+                                "created_at":datetime.now(timezone.utc),
+                            })
+                            load_custom_competitions.clear()
+                            st.success(f"Added {name}!"); st.rerun()
+                        except Exception as e: st.error(str(e))
+
+        # ── ct2: Enable / Disable ────────────────
         with ct2:
+            st.markdown("#### Enable / Disable competitions")
+            st.caption("Disabled competitions are hidden from students but remain in the database.")
+
+            all_comps_full = get_all_competitions(include_disabled=True)
+            disabled_set   = load_disabled_competitions()
+
+            # Group: built-in vs custom
+            builtin_names = list(COMPETITIONS_BUILTIN.keys())
+            custom_names  = [k for k in all_comps_full if k not in builtin_names]
+
+            def comp_toggle_row(name, info):
+                is_enabled = name not in disabled_set
+                c1, c2, c3 = st.columns([4, 2, 1])
+                c1.markdown(f"**{name}**")
+                c2.caption(info.get("description",""))
+                new_val = c3.toggle(
+                    "##tog", value=is_enabled,
+                    key=f"tog_{name.replace(' ','_').replace('(','').replace(')','')}"
+                )
+                if new_val != is_enabled:
+                    set_competition_enabled(name, new_val)
+                    st.rerun()
+
+            st.markdown("**Built-in competitions**")
+            for name in builtin_names:
+                comp_toggle_row(name, COMPETITIONS_BUILTIN[name])
+
+            if custom_names:
+                st.divider()
+                st.markdown("**Custom competitions**")
+                for name in custom_names:
+                    comp_toggle_row(name, all_comps_full[name])
+
+            st.divider()
+            enabled_count  = len(all_comps_full) - len(disabled_set)
+            disabled_count = len(disabled_set)
+            c1, c2 = st.columns(2)
+            c1.metric("Enabled",  enabled_count)
+            c2.metric("Disabled", disabled_count)
+            if disabled_set:
+                st.caption(f"Disabled: {', '.join(sorted(disabled_set))}")
+
+        # ── ct3: Edit / Delete ────────────────────
+        with ct3:
+            st.markdown("#### Edit or delete competitions in the catalog")
+            try:
+                cat_docs = list(db.collection("competition_catalog").stream())
+                if not cat_docs:
+                    st.info("No custom competitions added yet.")
+                else:
+                    for doc in cat_docs:
+                        d = doc.to_dict()
+                        with st.expander(f"**{d.get('name','')}** · {d.get('description','')}"):
+                            ef1,ef2 = st.columns(2)
+                            e_name = ef1.text_input("Name",  value=d.get("name",""),  key=f"en_{doc.id}")
+                            e_desc = ef2.text_input("Desc",  value=d.get("description",""), key=f"ed_{doc.id}")
+                            e_levels = st.text_area("Levels (one per line)",
+                                value="\n".join(d.get("levels",[])), height=80, key=f"el_{doc.id}")
+                            ef3,ef4,ef5 = st.columns(3)
+                            e_spq = ef3.number_input("Sec/q", 10, 600, int(d.get("secs_per_q",120)), key=f"es_{doc.id}")
+                            e_sc  = ef4.number_input("Score correct", 0.0, 10.0,
+                                float(d.get("scoring",{}).get("correct",1)), key=f"esc_{doc.id}")
+                            e_sw  = ef5.number_input("Score wrong", -5.0, 0.0,
+                                float(d.get("scoring",{}).get("wrong",0)), key=f"esw_{doc.id}")
+                            sb1,sb2 = st.columns(2)
+                            if sb1.button("💾  Save", key=f"ecsave_{doc.id}", type="primary", use_container_width=True):
+                                lvls = [l.strip() for l in e_levels.splitlines() if l.strip()] or ["General"]
+                                db.collection("competition_catalog").document(doc.id).update({
+                                    "name":e_name,"description":e_desc,"levels":lvls,
+                                    "secs_per_q":int(e_spq),
+                                    "scoring":{"correct":e_sc,"wrong":e_sw,"blank":0},
+                                })
+                                load_custom_competitions.clear()
+                                st.success("Updated!"); st.rerun()
+                            if sb2.button("🗑️  Delete", key=f"ecdel_{doc.id}", use_container_width=True):
+                                db.collection("competition_catalog").document(doc.id).delete()
+                                load_custom_competitions.clear()
+                                st.warning(f"Deleted {d.get('name','')}"); st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+        # ── ct4: Add questions to competition ─────
+        with ct4:
+            st.markdown("#### Add questions to a competition")
+            all_comps = get_all_competitions(include_disabled=True)
+
+            aq_comp = st.selectbox("Select competition", list(get_all_competitions(include_disabled=True).keys()), key="aq_comp")
+            aq_level = st.selectbox("Level", all_comps[aq_comp]["levels"], key="aq_level")
+            st.divider()
+
+            aq_tab1, aq_tab2 = st.tabs(["✏️  Add new question", "📥  Select from existing bank"])
+
+            # ── Add new question directly ─────────
+            with aq_tab1:
+                st.caption("Write a new question and save it directly to this competition.")
+                aq_topic = st.selectbox("Topic", TOPICS+["Other"], key="aq_topic")
+                aq_diff  = st.selectbox("Difficulty", ["easy","intermediate","advanced"], key="aq_diff")
+                aq_year  = st.number_input("Year", 2000, 2030, datetime.now().year, key="aq_year")
+                aq_atype = st.selectbox("Answer type", ["mc4","mc5","integer","decimal"], key="aq_atype")
+
+                aq_text = st.text_area("Question text (LaTeX supported)", height=120, key="aq_qtext")
+                aq_img  = st.file_uploader("Question image (optional)", type=["png","jpg","jpeg"], key="aq_qimg")
+                if aq_text:
+                    with st.expander("Preview"): st.markdown(aq_text)
+
+                # AI assess
+                if aq_text and st.button("🤖  AI assess difficulty & topic", key="aq_ai_btn"):
+                    with st.spinner("Analysing…"):
+                        ai_r = ai_assess_question(aq_text, "", "", aq_comp)
+                        if ai_r: st.session_state["aq_ai"] = ai_r; st.rerun()
+                if "aq_ai" in st.session_state:
+                    ar = st.session_state["aq_ai"]
+                    st.info(f"🤖 AI suggests — **{ar.get('topic','?')}** · **{ar.get('difficulty','?')}** · {ar.get('topic_reason','')} · {ar.get('difficulty_reason','')}")
+                    if st.button("Apply AI suggestion", key="aq_apply_ai"):
+                        st.session_state["aq_topic"] = ar.get("topic", aq_topic)
+                        st.session_state["aq_diff"]  = ar.get("difficulty", aq_diff)
+                        st.session_state.pop("aq_ai",None); st.rerun()
+
+                # Choices
+                aq_choices = []; aq_correct = ""
+                if aq_atype in ("mc4","mc5"):
+                    n = 4 if aq_atype=="mc4" else 5
+                    st.markdown("**Answer choices**")
+                    ch_cols = st.columns(n)
+                    for i in range(n):
+                        aq_choices.append(ch_cols[i].text_input(chr(65+i), key=f"aq_ch{i}"))
+                    aq_correct = st.selectbox("Correct answer",
+                        [chr(65+i) for i in range(n)], key="aq_correct_mc")
+                else:
+                    aq_correct = st.text_input("Correct answer (number)", key="aq_correct_num")
+
+                st.divider()
+                st.markdown("**Solution (optional)**")
+                sc1, sc2 = st.columns(2)
+                aq_sol     = sc1.text_area("Solution text / LaTeX", height=80, key="aq_sol")
+                aq_sol_img = sc2.file_uploader("Solution image", type=["png","jpg","jpeg"], key="aq_sol_img")
+                if aq_sol_img:
+                    st.image(aq_sol_img, caption="Solution preview", use_container_width=True)
+
+                if st.button("💾  Save question to this competition", type="primary", key="aq_save"):
+                    if not aq_text and not aq_img:
+                        st.error("Question text or image is required.")
+                    else:
+                        with st.spinner("Saving…"):
+                            ar = st.session_state.get("aq_ai",{})
+                            ts = datetime.now().timestamp()
+                            q_url   = upload_img(aq_img,     f"questions/{ts}_q.{aq_img.name.split('.')[-1]}")     if aq_img     else ""
+                            sol_url = upload_img(aq_sol_img, f"solutions/{ts}_s.{aq_sol_img.name.split('.')[-1]}") if aq_sol_img else ""
+                            save_question({
+                                "competition":        aq_comp,
+                                "level":              aq_level,
+                                "topic":              ar.get("topic",    aq_topic) if ar else aq_topic,
+                                "difficulty":         ar.get("difficulty",aq_diff)  if ar else aq_diff,
+                                "year":               int(aq_year),
+                                "answer_type":        aq_atype,
+                                "question_text":      aq_text,
+                                "question_image_url": q_url,
+                                "choices":            aq_choices,
+                                "correct_answer":     str(aq_correct),
+                                "solution_text":      aq_sol,
+                                "solution_image_url": sol_url,
+                            })
+                            st.session_state.pop("aq_ai",None)
+                        st.success(f"✅  Question saved to **{aq_comp} · {aq_level}**!")
+
+            # ── Select from existing bank ─────────
+            with aq_tab2:
+                st.caption("Copy questions from the existing bank into this competition.")
+
+                src_comp  = st.selectbox("Source competition", list(get_all_competitions(include_disabled=True).keys()), key="src_comp")
+                src_topic = st.selectbox("Topic filter", ["All"]+TOPICS+["Other"], key="src_topic")
+                src_diff  = st.selectbox("Difficulty filter", ["All","easy","intermediate","advanced"], key="src_diff")
+
+                if st.button("🔍  Browse source questions", key="src_browse"):
+                    try:
+                        ref = db.collection("questions").where("competition","==",src_comp)
+                        if src_topic != "All": ref = ref.where("topic","==",src_topic)
+                        if src_diff  != "All": ref = ref.where("difficulty","==",src_diff)
+                        docs = list(ref.limit(100).stream())
+                        st.session_state["src_docs"] = [(d.id, d.to_dict()) for d in docs]
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+                src_docs = st.session_state.get("src_docs",[])
+                if src_docs:
+                    st.caption(f"{len(src_docs)} questions found — tick the ones to copy")
+                    selected_ids = []
+                    for did, d in src_docs:
+                        qt = d.get("question_text","(image only)")[:70]
+                        label = f"[{d.get('difficulty','')}] [{d.get('topic','')}] {qt}…"
+                        if st.checkbox(label, key=f"src_sel_{did}"):
+                            selected_ids.append((did, d))
+
+                    if selected_ids:
+                        st.markdown(f"**{len(selected_ids)} question(s) selected**")
+                        keep_original = st.toggle(
+                            "Keep original competition tag (copy as-is)",
+                            value=False, key="src_keep_orig",
+                            help="Off = re-tag to target competition/level. On = keep original tags.")
+
+                        if st.button(f"📥  Copy {len(selected_ids)} question(s) → {aq_comp} · {aq_level}",
+                                     type="primary", key="src_copy"):
+                            copied = 0
+                            for did, d in selected_ids:
+                                new_q = dict(d)
+                                new_q.pop("id", None)
+                                if not keep_original:
+                                    new_q["competition"] = aq_comp
+                                    new_q["level"]       = aq_level
+                                db.collection("questions").add(new_q)
+                                copied += 1
+                            st.success(f"✅  {copied} question(s) copied to **{aq_comp} · {aq_level}**!")
+                            st.session_state.pop("src_docs",None)
+                            st.rerun()
+
+        # ── ct5: Realtime contest ─────────────────
+        with ct5:
             st.markdown("#### Realtime contest control")
             try:
                 contests = list(db.collection("custom_competitions").stream())
@@ -1872,14 +2458,22 @@ Admin2,admin2@example.com,AdminPass!,admin
                             scores=[]
                             for u in db.collection("users").stream():
                                 uid=u.id; name=u.to_dict().get("display_name","—")
-                                ss=list(db.collection("users").document(uid).collection("exam_sessions").where("competition","==",sel).order_by("raw_score",direction=firestore.Query.DESCENDING).limit(1).stream())
+                                ss=list(db.collection("users").document(uid).collection("exam_sessions")
+                                        .where("competition","==",sel)
+                                        .order_by("raw_score",direction=firestore.Query.DESCENDING)
+                                        .limit(1).stream())
                                 if ss: s=ss[0].to_dict(); scores.append({"name":name,"score":s.get("raw_score",0),"max":s.get("max_score",0),"pct":s.get("pct",0)})
                             scores.sort(key=lambda x:x["score"],reverse=True)
                             for rank,s in enumerate(scores,1):
                                 medal="🥇" if rank==1 else("🥈" if rank==2 else("🥉" if rank==3 else f"#{rank}"))
-                                c1,c2,c3=st.columns([1,4,2]); c1.markdown(medal); c2.markdown(f"**{s['name']}**"); c3.markdown(f"{s['score']} / {s['max']}  ({s['pct']}%)")
+                                c1,c2,c3=st.columns([1,4,2])
+                                c1.markdown(medal)
+                                c2.markdown(f"**{s['name']}**")
+                                c3.markdown(f"{s['score']} / {s['max']}  ({s['pct']}%)")
                         except Exception as e: st.error(f"Leaderboard error: {e}")
-                else: st.info("No competitions yet. Create one first.")
+                else:
+                    st.info("No realtime contests created yet.")
+                    st.caption("Create a contest via the custom_competitions collection or use the exam scheduling feature.")
             except Exception as e: st.error(f"Error: {e}")
 
     footer()
@@ -2008,23 +2602,46 @@ def page_history():
             )
     with col_dl2:
         if sessions:
-            # CSV export
+            # CSV export — collect all fieldnames first across all sessions
+            base_fields = ["date","competition","level","difficulty",
+                           "score","max","pct","duration_sec"]
+            all_topic_keys = []
+            for s in sessions:
+                for t in s.get("topic_breakdown",{}).keys():
+                    key = t.lower().replace(" ","_") + "_pct"
+                    if key not in all_topic_keys:
+                        all_topic_keys.append(key)
+            all_fields = base_fields + sorted(all_topic_keys)
+
             rows_csv = []
             for s in sessions:
-                ts  = s.get("timestamp_start"); tbd = s.get("topic_breakdown",{})
-                rows_csv.append({
-                    "date": ts.strftime("%Y-%m-%d") if ts else "",
-                    "competition": s.get("competition",""), "level": s.get("level",""),
-                    "difficulty": s.get("difficulty",""), "score": s.get("raw_score",""),
-                    "max": s.get("max_score",""), "pct": s.get("pct",""),
+                ts  = s.get("timestamp_start")
+                tbd = s.get("topic_breakdown",{})
+                row = {
+                    "date":         ts.strftime("%Y-%m-%d") if ts else "",
+                    "competition":  s.get("competition",""),
+                    "level":        s.get("level",""),
+                    "difficulty":   s.get("difficulty",""),
+                    "score":        s.get("raw_score",""),
+                    "max":          s.get("max_score",""),
+                    "pct":          s.get("pct",""),
                     "duration_sec": s.get("duration_sec",""),
-                    **{t.lower().replace(" ","_")+"_pct":
-                       round(v["correct"]/v["total"]*100) if v["total"]>0 else ""
-                       for t,v in tbd.items()},
-                })
+                }
+                # Fill topic columns — blank if topic not in this session
+                for t, v in tbd.items():
+                    key = t.lower().replace(" ","_") + "_pct"
+                    row[key] = round(v["correct"]/v["total"]*100) if v.get("total",0)>0 else 0
+                rows_csv.append(row)
+
             buf = io.StringIO()
-            w   = csv.DictWriter(buf, fieldnames=rows_csv[0].keys())
-            w.writeheader(); w.writerows(rows_csv)
+            w   = csv.DictWriter(buf, fieldnames=all_fields, extrasaction="ignore")
+            w.writeheader()
+            for row in rows_csv:
+                # Fill missing topic columns with empty string
+                for f in all_fields:
+                    row.setdefault(f, "")
+                w.writerow(row)
+
             st.download_button(
                 "📊  Download CSV",
                 data=buf.getvalue().encode(),
@@ -2087,7 +2704,7 @@ def page_leaderboard():
     </div>
     <div class="mc-body">""", unsafe_allow_html=True)
 
-    comp_options = ["All"] + list(COMPETITIONS.keys())
+    comp_options = ["All"] + list(get_all_competitions().keys())
     c1,c2 = st.columns(2)
     lb_comp   = c1.selectbox("Competition", comp_options, key="lb_comp")
     lb_metric = c2.selectbox("Rank by", ["Best accuracy (%)","Best raw score","Most sessions"], key="lb_metric")
