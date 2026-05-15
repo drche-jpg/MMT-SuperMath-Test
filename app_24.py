@@ -1781,8 +1781,23 @@ Provide a thorough solution that a student can learn from."""
             comp,level,topic,diff,year,atype = meta_fields("ai_")
 
             q_img = st.file_uploader("Question image", type=["png","jpg","jpeg"], key="ai_qimg")
+
+            # ── Clear stale results when a new image is uploaded ──
             if q_img:
-                st.image(q_img, caption="Uploaded image", use_container_width=True)
+                # Track filename+size to detect a new upload
+                img_sig = f"{q_img.name}_{q_img.size}"
+                if st.session_state.get("ai_img_sig") != img_sig:
+                    # New image — clear all previous extraction results
+                    for k in ("ai_full","ai_ocr_result","ai_topic_override",
+                              "ai_diff_override","ai_img_sig"):
+                        st.session_state.pop(k, None)
+                    st.session_state["ai_img_sig"] = img_sig
+                st.image(q_img, caption=f"Uploaded: {q_img.name}", use_container_width=True)
+            else:
+                # No image — also clear stale data
+                for k in ("ai_full","ai_ocr_result","ai_topic_override",
+                          "ai_diff_override","ai_img_sig"):
+                    st.session_state.pop(k, None)
 
             if q_img and st.button("🤖  Full AI Extract (question + choices + solution)", type="primary", key="ai_ocr"):
                 with st.spinner("Claude is reading the image — extracting everything…"):
@@ -1795,6 +1810,7 @@ Provide a thorough solution that a student can learn from."""
                         if result:
                             st.session_state["ai_full"] = result
                             st.success("✅  Extraction complete — review fields below and edit if needed.")
+                            st.rerun()
                         else:
                             st.error("Extraction failed. Check your ANTHROPIC_API_KEY.")
                     except Exception as e:
@@ -1904,6 +1920,16 @@ Provide a thorough solution that a student can learn from."""
             year   = c2.number_input("Year",2000,2030,datetime.now().year,key="pdf_year")
             atype  = st.selectbox("Answer type (all)",["mc5","mc4","integer","decimal"],key="pdf_atype")
             pdf_file = st.file_uploader("Upload PDF", type=["pdf"], key="pdf_upload")
+
+            # Clear stale results when a new PDF is uploaded
+            if pdf_file:
+                pdf_sig = f"{pdf_file.name}_{pdf_file.size}"
+                if st.session_state.get("pdf_sig") != pdf_sig:
+                    st.session_state.pop("pdf_questions", None)
+                    st.session_state["pdf_sig"] = pdf_sig
+            else:
+                st.session_state.pop("pdf_questions", None)
+                st.session_state.pop("pdf_sig", None)
 
             if pdf_file and st.button("🤖  Extract questions from PDF", key="pdf_extract", type="primary"):
                 with st.spinner("Claude is reading the PDF — extracting questions, choices, answers and solutions…"):
@@ -2719,45 +2745,157 @@ Admin2,admin2@example.com,AdminPass!,admin
 
         # ── ct5: Realtime contest ─────────────────
         with ct5:
-            st.markdown("#### Realtime contest control")
+            st.markdown("#### ⚡ Realtime Contest Control")
+            st.caption("Open and close a competition window, then monitor the live leaderboard.")
+
+            # Load competitions from BOTH sources
+            all_rt_comps = {}
+
+            # 1. From competition_catalog (admin-created)
             try:
-                contests = list(db.collection("custom_competitions").stream())
-                if contests:
-                    cmap = {d.id: d.to_dict().get("name",d.id) for d in contests}
-                    sel  = st.selectbox("Select competition",list(cmap.keys()),format_func=lambda x:cmap[x],key="rt_sel")
-                    doc  = db.collection("custom_competitions").document(sel).get()
-                    cd   = doc.to_dict() if doc.exists else {}
-                    st.markdown(f"**Status:** `{cd.get('status','draft')}`")
-                    c1,c2,c3 = st.columns(3)
-                    if c1.button("▶️  Open exam",type="primary",use_container_width=True):
-                        db.collection("custom_competitions").document(sel).update({"status":"open","opened_at":datetime.now(timezone.utc)}); st.success("Exam OPEN"); st.rerun()
-                    if c2.button("⏹️  Close exam",use_container_width=True):
-                        db.collection("custom_competitions").document(sel).update({"status":"closed","closed_at":datetime.now(timezone.utc)}); st.warning("Exam CLOSED"); st.rerun()
-                    if c3.button("📊  Leaderboard",use_container_width=True):
-                        st.session_state["rt_lb"]=sel; st.rerun()
-                    if st.session_state.get("rt_lb")==sel:
-                        st.divider(); st.markdown("#### 🏆  Live Leaderboard")
-                        try:
-                            scores=[]
-                            for u in db.collection("users").stream():
-                                uid=u.id; name=u.to_dict().get("display_name","—")
-                                ss=list(db.collection("users").document(uid).collection("exam_sessions")
-                                        .where("competition","==",sel)
-                                        .order_by("raw_score",direction=firestore.Query.DESCENDING)
-                                        .limit(1).stream())
-                                if ss: s=ss[0].to_dict(); scores.append({"name":name,"score":s.get("raw_score",0),"max":s.get("max_score",0),"pct":s.get("pct",0)})
-                            scores.sort(key=lambda x:x["score"],reverse=True)
+                for doc in db.collection("competition_catalog").stream():
+                    d = doc.to_dict()
+                    n = d.get("name","")
+                    if n: all_rt_comps[n] = {"doc_id":doc.id,"source":"catalog","data":d}
+            except: pass
+
+            # 2. From built-in + custom via get_all_competitions
+            for n, info in get_all_competitions(include_disabled=True).items():
+                if n not in all_rt_comps:
+                    all_rt_comps[n] = {"doc_id":None,"source":"builtin","data":info}
+
+            if not all_rt_comps:
+                st.warning("No competitions found. Create one in the ➕ Add Competition tab first.")
+            else:
+                sel_name = st.selectbox(
+                    "Select competition to run",
+                    list(all_rt_comps.keys()),
+                    key="rt_sel"
+                )
+                sel_info = all_rt_comps[sel_name]
+
+                # Load or create realtime session doc
+                rt_doc_ref = db.collection("realtime_sessions").document(
+                    sel_name.replace(" ","_").replace("/","_")
+                )
+                rt_doc = rt_doc_ref.get()
+                rt_data = rt_doc.to_dict() if rt_doc.exists else {}
+                status  = rt_data.get("status","not started")
+
+                # Status badge
+                badge_color = {"open":"#22C55E","closed":"#EF4444","not started":"#8898CC"}.get(status,"#8898CC")
+                st.markdown(
+                    f"<div style='display:inline-flex;align-items:center;gap:8px;"
+                    f"background:#F8F9FF;border:1.5px solid #E8ECF8;border-radius:8px;"
+                    f"padding:8px 16px;margin-bottom:16px;'>"
+                    f"<span style='width:10px;height:10px;border-radius:50%;"
+                    f"background:{badge_color};display:inline-block;'></span>"
+                    f"<span style='font-weight:600;color:#1B2B6B;'>Status: {status.upper()}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+                if rt_data.get("opened_at"):
+                    st.caption(f"Opened: {rt_data['opened_at'].strftime('%d %b %Y %H:%M')}")
+                if rt_data.get("closed_at"):
+                    st.caption(f"Closed: {rt_data['closed_at'].strftime('%d %b %Y %H:%M')}")
+
+                # Control buttons
+                c1,c2,c3 = st.columns(3)
+                if c1.button("▶️  Open exam", type="primary", use_container_width=True):
+                    rt_doc_ref.set({
+                        "competition": sel_name,
+                        "status":      "open",
+                        "opened_at":   datetime.now(timezone.utc),
+                        "closed_at":   None,
+                    }, merge=True)
+                    st.success(f"✅  **{sel_name}** is now OPEN — students can start!")
+                    st.rerun()
+
+                if c2.button("⏹️  Close exam", use_container_width=True):
+                    rt_doc_ref.set({
+                        "status":    "closed",
+                        "closed_at": datetime.now(timezone.utc),
+                    }, merge=True)
+                    st.warning(f"🔒  **{sel_name}** is now CLOSED.")
+                    st.rerun()
+
+                if c3.button("🔄  Reset", use_container_width=True):
+                    rt_doc_ref.set({
+                        "competition": sel_name,
+                        "status":      "not started",
+                        "opened_at":   None,
+                        "closed_at":   None,
+                    })
+                    st.info("Reset to draft.")
+                    st.rerun()
+
+                st.divider()
+
+                # Share link
+                app_url = st.secrets.get("APP_URL","https://share.streamlit.io")
+                share_url = f"{app_url}?comp={sel_name.replace(' ','+')}"
+                st.markdown("**📎 Share this link with students:**")
+                st.code(share_url, language=None)
+
+                st.divider()
+
+                # Live leaderboard
+                st.markdown("#### 🏆 Live Leaderboard")
+                st.caption("Click Refresh to update. Press R on keyboard to reload the page.")
+
+                if st.button("🔄  Refresh leaderboard", key="rt_refresh", type="primary"):
+                    st.session_state["rt_lb_show"] = True
+
+                if st.session_state.get("rt_lb_show"):
+                    try:
+                        scores = []
+                        for u in db.collection("users").stream():
+                            uid  = u.id
+                            prof = u.to_dict()
+                            if prof.get("role") == "admin": continue
+                            uname = prof.get("display_name","—")
+                            ss = list(
+                                db.collection("users").document(uid)
+                                .collection("exam_sessions")
+                                .where("competition","==",sel_name)
+                                .order_by("raw_score",direction=firestore.Query.DESCENDING)
+                                .limit(1).stream()
+                            )
+                            if ss:
+                                s = ss[0].to_dict()
+                                ts = s.get("timestamp_start")
+                                scores.append({
+                                    "name":  uname,
+                                    "score": s.get("raw_score",0),
+                                    "max":   s.get("max_score",0),
+                                    "pct":   s.get("pct",0),
+                                    "time":  ts.strftime("%H:%M") if ts else "—",
+                                    "dur":   f"{s.get('duration_sec',0)//60}m {s.get('duration_sec',0)%60}s",
+                                })
+                        scores.sort(key=lambda x:x["score"],reverse=True)
+
+                        if not scores:
+                            st.info("No submissions yet. Waiting for students…")
+                        else:
+                            st.markdown(f"**{len(scores)} submission(s)**")
+                            # Header
+                            h1,h2,h3,h4,h5,h6 = st.columns([1,4,2,2,2,2])
+                            for col,lbl in zip([h1,h2,h3,h4,h5,h6],
+                                               ["Rank","Name","Score","Accuracy","Time","Duration"]):
+                                col.markdown(f"**{lbl}**")
+                            st.divider()
                             for rank,s in enumerate(scores,1):
-                                medal="🥇" if rank==1 else("🥈" if rank==2 else("🥉" if rank==3 else f"#{rank}"))
-                                c1,c2,c3=st.columns([1,4,2])
-                                c1.markdown(medal)
-                                c2.markdown(f"**{s['name']}**")
-                                c3.markdown(f"{s['score']} / {s['max']}  ({s['pct']}%)")
-                        except Exception as e: st.error(f"Leaderboard error: {e}")
-                else:
-                    st.info("No realtime contests created yet.")
-                    st.caption("Create a contest via the custom_competitions collection or use the exam scheduling feature.")
-            except Exception as e: st.error(f"Error: {e}")
+                                medal = "🥇" if rank==1 else("🥈" if rank==2 else("🥉" if rank==3 else f"**#{rank}**"))
+                                r1,r2,r3,r4,r5,r6 = st.columns([1,4,2,2,2,2])
+                                r1.markdown(medal)
+                                r2.markdown(f"**{s['name']}**")
+                                r3.markdown(f"{s['score']} / {s['max']}")
+                                r4.markdown(f"{s['pct']}%")
+                                r5.markdown(s["time"])
+                                r6.markdown(s["dur"])
+
+                    except Exception as e:
+                        st.error(f"Leaderboard error: {e}")
 
     footer()
 
