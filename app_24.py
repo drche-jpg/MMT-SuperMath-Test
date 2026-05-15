@@ -3320,6 +3320,172 @@ def page_admin_analytics():
 
 
 # ══════════════════════════════════════════════
+# Page: Realtime Competition
+# ══════════════════════════════════════════════
+def page_realtime():
+    """
+    Dedicated page for students joining via a realtime competition link.
+    Shows waiting room if not open, exam setup if open, closed message if closed.
+    """
+    require_auth(); inject_css()
+    comp_name = st.session_state.get("rt_comp","")
+    uid       = st.session_state["uid"]
+    name      = st.session_state.get("display_name","Student")
+
+    # Load realtime session status
+    rt_doc_id = comp_name.replace(" ","_").replace("/","_")
+    try:
+        rt_doc  = db.collection("realtime_sessions").document(rt_doc_id).get()
+        rt_data = rt_doc.to_dict() if rt_doc.exists else {}
+        status  = rt_data.get("status","not started")
+    except Exception as e:
+        st.error(f"Error loading competition status: {e}")
+        status = "not started"
+
+    topbar(comp_name)
+
+    # ── CLOSED ────────────────────────────────
+    if status == "closed":
+        st.markdown(f"""
+        <div class="mc-hero">
+          <div class="mc-hero-eyebrow">Realtime Competition</div>
+          <div class="mc-hero-title"><em>{comp_name}</em></div>
+        </div>
+        <div class="mc-body" style="text-align:center;padding:60px 28px;">
+          <div style="font-size:64px;margin-bottom:16px;">🔒</div>
+          <div style="font-family:'Fraunces',serif;font-size:28px;font-weight:300;
+                      color:#1B2B6B;margin-bottom:12px;">This competition has closed</div>
+          <div style="font-size:15px;color:#8898CC;margin-bottom:32px;">
+            The exam window for <strong>{comp_name}</strong> has ended.<br>
+            Thank you for participating!
+          </div>
+        </div>""", unsafe_allow_html=True)
+        if st.button("← Back to Dashboard", use_container_width=False):
+            st.session_state["page"] = "dashboard"; st.rerun()
+        footer(); return
+
+    # ── NOT STARTED / WAITING ─────────────────
+    if status != "open":
+        # Auto-refresh every 10 seconds while waiting
+        import streamlit.components.v1 as _comp
+        _comp.html(
+            "<script>setTimeout(function(){window.parent.location.reload();},10000);</script>",
+            height=0
+        )
+        opened_str = ""
+        if rt_data.get("opened_at"):
+            opened_str = rt_data["opened_at"].strftime("%d %b %Y %H:%M")
+
+        st.markdown(f"""
+        <div class="mc-hero">
+          <div class="mc-hero-eyebrow">Realtime Competition</div>
+          <div class="mc-hero-title"><em>{comp_name}</em></div>
+        </div>
+        <div class="mc-body" style="text-align:center;padding:60px 28px;">
+          <div style="font-size:64px;margin-bottom:16px;animation:pulse 2s ease-in-out infinite;">⏳</div>
+          <div style="font-family:'Fraunces',serif;font-size:28px;font-weight:300;
+                      color:#1B2B6B;margin-bottom:12px;">Waiting for competition to start…</div>
+          <div style="font-size:15px;color:#8898CC;margin-bottom:8px;">
+            Welcome, <strong>{name}</strong>! You are registered for:
+          </div>
+          <div style="font-size:20px;font-weight:600;color:#1B2B6B;margin-bottom:24px;">
+            {comp_name}
+          </div>
+          <div style="background:#EEF3FF;border:1.5px solid #C8D8FF;border-radius:12px;
+                      padding:16px 24px;display:inline-block;margin-bottom:24px;">
+            <div style="font-size:13px;color:#8898CC;margin-bottom:4px;">Status</div>
+            <div style="font-size:18px;font-weight:600;color:#4A7CF7;">
+              🟡 Waiting for admin to open the exam
+            </div>
+          </div>
+          <div style="font-size:13px;color:#8898CC;">
+            This page refreshes automatically every 10 seconds.<br>
+            The exam will start as soon as your administrator opens it.
+          </div>
+        </div>
+        <style>
+        @keyframes pulse {{0%,100%{{opacity:1}}50%{{opacity:.5}}}}
+        </style>""", unsafe_allow_html=True)
+
+        col1,col2,col3 = st.columns([1,1,1])
+        if col2.button("🔄  Check now", use_container_width=True, type="primary"):
+            st.rerun()
+        footer(); return
+
+    # ── OPEN — show exam setup ─────────────────
+    st.markdown(f"""
+    <div class="mc-hero">
+      <div class="mc-hero-eyebrow">🟢 Competition is LIVE</div>
+      <div class="mc-hero-title"><em>{comp_name}</em></div>
+    </div>
+    <div class="mc-body">""", unsafe_allow_html=True)
+
+    st.markdown(f"""
+    <div style="background:linear-gradient(135deg,#F0FFF9,#EEF3FF);border:1.5px solid #A7F3D0;
+                border-radius:12px;padding:16px 24px;margin-bottom:20px;display:flex;
+                align-items:center;gap:12px;">
+      <span style="font-size:28px;">🟢</span>
+      <div>
+        <div style="font-size:15px;font-weight:600;color:#1B2B6B;">The competition is now open!</div>
+        <div style="font-size:13px;color:#5060A0;">
+          Configure your exam below and click <strong>Start Exam</strong> to begin.
+        </div>
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+    # Get competition info
+    all_comps = get_all_competitions()
+    if comp_name not in all_comps:
+        st.error(f"Competition '{comp_name}' not found in catalog.")
+        footer(); return
+
+    comp_info = all_comps[comp_name]
+    st.caption(comp_info.get("description",""))
+
+    # Level + difficulty + questions
+    c1,c2,c3 = st.columns(3)
+    level       = c1.selectbox("Level / Division", comp_info["levels"], key="rt_level")
+    difficulty  = c2.selectbox("Difficulty", DIFFICULTY_OPTIONS, key="rt_diff")
+    n_questions = c3.slider("Number of questions", 1, 100, 20, key="rt_nq")
+
+    suggested = n_questions * comp_info["secs_per_q"]
+    st.caption(f"Suggested time: **{suggested//60} min** ({comp_info['secs_per_q']}s per question)")
+
+    rules = comp_info["scoring"]
+    if rules.get("wrong",0) < 0:
+        st.markdown(
+            f'<div class="mc-penalty">⚠️ Penalty scoring: '
+            f'Correct +{rules["correct"]} · Wrong {rules["wrong"]} · Blank {rules["blank"]}</div>',
+            unsafe_allow_html=True)
+
+    if st.button("🚀  Start Competition Exam", type="primary", use_container_width=True):
+        with st.spinner("Loading questions…"):
+            qs = fetch_questions(comp_name, level, difficulty, n_questions)
+        if not qs:
+            st.error("No questions found for this selection. Please try a different difficulty or level.")
+        else:
+            settings = load_settings(comp_name)
+            st.session_state.update({
+                "page":        "exam",
+                "competition": comp_name,
+                "level":       level,
+                "difficulty":  difficulty,
+                "questions":   qs,
+                "answers":     {},
+                "flagged":     set(),
+                "current_idx": 0,
+                "start_time":  time.time(),
+                "time_limit":  suggested,
+                "exam_settings": settings,
+                "from_realtime": True,
+            })
+            st.rerun()
+
+    st.markdown("</div>", unsafe_allow_html=True)
+    footer()
+
+
+# ══════════════════════════════════════════════
 # Sidebar
 # ══════════════════════════════════════════════
 def render_sidebar():
@@ -3328,7 +3494,9 @@ def render_sidebar():
         st.markdown(f"**{st.session_state.get('display_name','')}**")
         st.caption(st.session_state.get("role","student").capitalize())
         st.divider()
-        if st.button("🏠  Dashboard",       use_container_width=True): st.session_state["page"]="dashboard";   st.rerun()
+        if st.button("🏠  Dashboard",       use_container_width=True):
+            for k in ("rt_comp","rt_status"): st.session_state.pop(k,None)
+            st.session_state["page"]="dashboard"; st.rerun()
         if st.button("📋  My History",       use_container_width=True): st.session_state["page"]="history";     st.rerun()
         if st.button("🏆  Leaderboard",      use_container_width=True): st.session_state["page"]="leaderboard"; st.rerun()
         if st.session_state.get("role")=="admin":
@@ -3347,25 +3515,61 @@ def render_sidebar():
 def main():
     if "page" not in st.session_state: st.session_state["page"]="login"
 
-    # Handle direct competition link: ?comp=AMC10&level=AMC+10A
     params = st.query_params
-    if "comp" in params and "uid" not in st.session_state:
-        st.session_state["pending_comp"]  = params.get("comp","")
-        st.session_state["pending_level"] = params.get("level","")
+
+    # ── Handle ?comp= URL parameter ──────────────
+    if "comp" in params:
+        comp_param = params.get("comp","").strip()
+
+        if comp_param and "uid" not in st.session_state:
+            # Not logged in — save pending and go to login
+            st.session_state["pending_comp"]  = comp_param
+            st.session_state["pending_level"] = params.get("level","")
+
+        elif comp_param and "uid" in st.session_state:
+            # Logged in — check if this is a realtime competition
+            if st.session_state.get("rt_comp") != comp_param:
+                # New competition link — check its realtime status
+                rt_doc_id = comp_param.replace(" ","_").replace("/","_")
+                try:
+                    rt_doc  = db.collection("realtime_sessions").document(rt_doc_id).get()
+                    rt_data = rt_doc.to_dict() if rt_doc.exists else {}
+                    rt_status = rt_data.get("status","not started")
+                except:
+                    rt_status = "not started"
+
+                # Store and route
+                st.session_state["rt_comp"]   = comp_param
+                st.session_state["rt_status"] = rt_status
+
+                # Always go to realtime page (waiting room or open exam)
+                st.session_state["page"] = "realtime"
+                # Clear any prefill to avoid conflict
+                st.session_state.pop("pending_comp",  None)
+                st.session_state.pop("pending_level", None)
+                st.rerun()
 
     render_sidebar()
     page = st.session_state["page"]
 
-    # After login, redirect to competition if pending
+    # ── After login, handle pending competition link ──
     if "uid" in st.session_state and st.session_state.get("pending_comp"):
-        comp  = st.session_state.pop("pending_comp","")
-        level = st.session_state.pop("pending_level","")
-        if comp in COMPETITIONS:
-            st.session_state.update({
-                "page":"dashboard",
-                "_prefill_comp":comp,
-                "_prefill_level":level,
-            })
+        comp_param = st.session_state.pop("pending_comp","")
+        level_param = st.session_state.pop("pending_level","")
+
+        if comp_param:
+            # Check realtime status
+            rt_doc_id = comp_param.replace(" ","_").replace("/","_")
+            try:
+                rt_doc  = db.collection("realtime_sessions").document(rt_doc_id).get()
+                rt_data = rt_doc.to_dict() if rt_doc.exists else {}
+                rt_status = rt_data.get("status","not started")
+            except:
+                rt_status = "not started"
+
+            st.session_state["rt_comp"]   = comp_param
+            st.session_state["rt_status"] = rt_status
+            st.session_state["page"]      = "realtime"
             st.rerun()
 
     if   page=="login":            page_login()
@@ -3376,6 +3580,7 @@ def main():
     elif page=="history":          page_history()
     elif page=="leaderboard":      page_leaderboard()
     elif page=="admin_analytics":  page_admin_analytics()
+    elif page=="realtime":         page_realtime()
     else:
         st.error(f"Unknown page: {page}")
         st.session_state["page"]="login"; st.rerun()
