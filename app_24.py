@@ -246,6 +246,32 @@ def inject_css():
     /* ── DIVIDER ── */
     hr { border-color: var(--border2) !important; margin: 18px 0 !important; }
 
+    /* ── MOBILE RESPONSIVE ── */
+    @media (max-width: 768px) {
+      .mc-hero { padding: 20px 16px 24px !important; }
+      .mc-topbar { padding: 0 16px !important; height: 50px !important; }
+      .mc-body { padding: 20px 16px !important; }
+      .mc-card { padding: 16px !important; }
+      .mc-metrics { grid-template-columns: repeat(2,1fr) !important; }
+      .mc-metric { padding: 12px 14px !important; }
+      .mc-metric-val { font-size: 18px !important; }
+      .mc-result-score { font-size: 44px !important; }
+      .mc-result-meta { gap: 16px !important; flex-wrap: wrap; }
+      .mc-result-hero { padding: 24px 16px !important; }
+      .mc-nav-strip { padding: 8px 16px !important; }
+      .mc-footer { padding: 12px 16px !important; flex-direction: column; gap: 4px; }
+      .block-container { padding: 0 !important; }
+      /* Stack columns on mobile */
+      [data-testid="stHorizontalBlock"] { flex-wrap: wrap !important; }
+      [data-testid="stHorizontalBlock"] > [data-testid="stVerticalBlock"] {
+        min-width: 100% !important; flex: 1 1 100% !important;
+      }
+    }
+    @media (max-width: 480px) {
+      .mc-metrics { grid-template-columns: repeat(2,1fr) !important; }
+      .mc-hero-title { font-size: 22px !important; }
+    }
+
     /* ── SIDEBAR ── */
     [data-testid="stSidebar"] .stButton button {
       background: rgba(255,255,255,.08) !important;
@@ -499,6 +525,7 @@ DEFAULT_SETTINGS = {
     "block_text_selection":False,"block_paste_answer":True,"block_drag":True,
     "block_right_click":True,"tab_switch_warning":True,"block_printscreen":True,
     "clipboard_api_override":False,"devtools_detection":False,"screen_capture_block":False,
+    "time_per_question":0,  # 0 = disabled; >0 = seconds per question
 }
 
 # ══════════════════════════════════════════════
@@ -1012,15 +1039,22 @@ def page_dashboard():
             <div style="font-size:12px;color:rgba(255,255,255,.5);">Import questions · Manage members · Competition settings</div>
           </div>
         </div>""", unsafe_allow_html=True)
-        if st.button("Open Admin Panel →", type="primary", key="admin_shortcut"):
+        col_ab1, col_ab2 = st.columns(2)
+        if col_ab1.button("Open Admin Panel →", type="primary", key="admin_shortcut", use_container_width=True):
             st.session_state["page"] = "admin"; st.rerun()
+        if col_ab2.button("📊 Analytics Dashboard →", key="analytics_shortcut", use_container_width=True):
+            st.session_state["page"] = "admin_analytics"; st.rerun()
         st.divider()
 
     st.markdown('<span class="mc-section-lbl">Start a new exam</span>', unsafe_allow_html=True)
     st.markdown('<div class="mc-card">', unsafe_allow_html=True)
     ca, cb = st.columns(2)
     with ca:
-        competition = st.selectbox("Competition", list(COMPETITIONS.keys()))
+        # Pre-fill from direct competition URL
+        default_comp = st.session_state.pop("_prefill_comp","") if "_prefill_comp" in st.session_state else None
+        comp_keys    = list(COMPETITIONS.keys())
+        comp_idx     = comp_keys.index(default_comp) if default_comp and default_comp in comp_keys else 0
+        competition  = st.selectbox("Competition", comp_keys, index=comp_idx)
         comp_info   = COMPETITIONS[competition]
         st.caption(comp_info["description"])
         level = st.selectbox("Level / Division", comp_info["levels"])
@@ -1045,6 +1079,13 @@ def page_dashboard():
                 "start_time":time.time(),"time_limit":suggested,"exam_settings":load_settings(competition)})
             st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
+
+    # Quick nav buttons
+    qn1, qn2 = st.columns(2)
+    if qn1.button("📋  My full history & download", use_container_width=True):
+        st.session_state["page"]="history"; st.rerun()
+    if qn2.button("🏆  View leaderboard", use_container_width=True):
+        st.session_state["page"]="leaderboard"; st.rerun()
 
     if sessions:
         st.markdown('<span class="mc-section-lbl" style="display:block;margin-top:20px;">Recent sessions</span>', unsafe_allow_html=True)
@@ -1130,11 +1171,35 @@ def page_exam():
 
     # Question
     q = qs[idx]; qid = q["id"]
+    # Per-question timer
+    tpq = settings.get("time_per_question", 0)
+    if tpq and tpq > 0:
+        q_key = f"q_start_{idx}"
+        if q_key not in st.session_state:
+            st.session_state[q_key] = time.time()
+        q_elapsed = time.time() - st.session_state[q_key]
+        q_remain  = max(0, tpq - q_elapsed)
+        qm, qs2   = divmod(int(q_remain), 60)
+        qtc = "#EF4444" if q_remain < 10 else ("#F5A623" if q_remain < 30 else "#4A7CF7")
+        q_timer_html = (
+            f'<span style="background:rgba(74,124,247,.1);border:1px solid #C8D8FF;'
+            f'border-radius:6px;padding:3px 10px;font-family:monospace;'
+            f'font-size:11px;color:{qtc};font-weight:600;">⏱ {qm:02d}:{qs2:02d}</span>'
+        )
+        if q_remain == 0:
+            # Auto-advance to next question
+            if idx < len(qs)-1:
+                st.session_state["current_idx"] = idx + 1
+            st.rerun()
+    else:
+        q_timer_html = ""
+
     st.markdown(f"""
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
       <span style="font-family:'DM Mono',monospace;font-size:11px;color:#8898CC;">Q{idx+1} / {len(qs)}</span>
       <span style="font-size:11px;font-family:'DM Mono',monospace;padding:3px 10px;border-radius:20px;
                    background:#EEF3FF;border:1px solid #C8D8FF;color:#4A7CF7;">{q.get('topic','')}</span>
+      {q_timer_html}
     </div>""", unsafe_allow_html=True)
 
     if q.get("question_image_url"): st.image(q["question_image_url"], use_container_width=True)
@@ -1339,6 +1404,15 @@ def page_admin():
         brow("Require Competitor ID verification","Forces ID entry before exam","s_rid","require_competitor_id")
         brow("Show answer after submit","Shows correct answer and solution after submission","s_sas","show_answer_after_submit")
         brow("Allow bilingual (TH/EN) toggle","Requires both EN and TH content","s_bil","allow_bilingual")
+
+        st.markdown("**⏱  Per-question time limit (optional)**")
+        c_tpq1, c_tpq2 = st.columns([3,1])
+        c_tpq1.caption("Set a time limit per question in seconds. 0 = disabled (students can take as long as needed).")
+        settings["time_per_question"] = c_tpq2.number_input(
+            "Seconds per question", min_value=0, max_value=600,
+            value=int(settings.get("time_per_question",0)), step=10, key="s_tpq")
+        if settings["time_per_question"] > 0:
+            st.caption(f"Each question auto-advances after **{settings['time_per_question']} seconds** ({settings['time_per_question']//60}m {settings['time_per_question']%60}s).")
 
         st.divider()
         ec = sum(1 for k in ["anti_copy_text","noise_canvas","block_ctrl_c","block_text_selection",
@@ -1810,6 +1884,403 @@ Admin2,admin2@example.com,AdminPass!,admin
 
     footer()
 
+
+# ══════════════════════════════════════════════
+# PDF Report generator (student personal report)
+# ══════════════════════════════════════════════
+def generate_pdf_report(name:str, sessions:list) -> bytes:
+    """Generate a simple HTML→PDF-style report as HTML bytes for download."""
+    rows = ""
+    for s in sessions:
+        ts  = s.get("timestamp_start")
+        dt  = ts.strftime("%d %b %Y") if ts else "—"
+        tbd = s.get("topic_breakdown",{})
+        topic_str = " · ".join(
+            f"{t}: {round(v['correct']/v['total']*100)}%"
+            for t,v in tbd.items() if v.get("total",0)>0
+        )
+        color = "#22C55E" if s.get("pct",0)>=70 else ("#EAB308" if s.get("pct",0)>=50 else "#EF4444")
+        rows += f"""
+        <tr>
+          <td>{dt}</td>
+          <td><strong>{s.get("competition","")}</strong> · {s.get("level","")}</td>
+          <td>{s.get("difficulty","").capitalize()}</td>
+          <td style="text-align:center;font-weight:600;">{s.get("raw_score","")} / {s.get("max_score","")}</td>
+          <td style="text-align:center;font-weight:700;color:{color};">{s.get("pct","")}%</td>
+          <td style="font-size:11px;color:#5060A0;">{topic_str}</td>
+        </tr>"""
+
+    total_sessions = len(sessions)
+    avg_pct = round(sum(s.get("pct",0) for s in sessions)/total_sessions,1) if sessions else 0
+    best    = max(sessions, key=lambda s:s.get("pct",0)) if sessions else {}
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<style>
+  body{{font-family:'Segoe UI',Arial,sans-serif;color:#1B2B6B;margin:0;padding:0;background:#F8F9FF;}}
+  .header{{background:#1B2B6B;color:#fff;padding:32px 48px;}}
+  .header h1{{margin:0;font-size:28px;font-weight:300;font-style:italic;}}
+  .header p{{margin:6px 0 0;font-size:12px;opacity:.55;letter-spacing:.1em;text-transform:uppercase;}}
+  .body{{padding:36px 48px;}}
+  .student{{font-size:22px;font-weight:600;margin-bottom:4px;}}
+  .meta{{font-size:13px;color:#8898CC;margin-bottom:28px;}}
+  .summary{{display:flex;gap:20px;margin-bottom:32px;}}
+  .card{{background:#fff;border:1.5px solid #E8ECF8;border-radius:12px;padding:16px 20px;flex:1;}}
+  .card-label{{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:#8898CC;margin-bottom:4px;}}
+  .card-val{{font-size:26px;font-weight:700;color:#1B2B6B;}}
+  table{{width:100%;border-collapse:collapse;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(27,43,107,.06);}}
+  th{{background:#1B2B6B;color:#fff;padding:12px 16px;font-size:12px;text-align:left;font-weight:500;letter-spacing:.05em;}}
+  td{{padding:11px 16px;font-size:13px;border-bottom:1px solid #F3F5FB;}}
+  tr:last-child td{{border-bottom:none;}}
+  tr:hover td{{background:#F8F9FF;}}
+  .footer{{background:#1B2B6B;color:rgba(255,255,255,.4);padding:16px 48px;font-size:11px;margin-top:0;}}
+</style>
+</head><body>
+<div class="header">
+  <h1>MathComp · Student Report</h1>
+  <p>Math Mission Thailand · Generated {datetime.now().strftime("%d %b %Y %H:%M")}</p>
+</div>
+<div class="body">
+  <div class="student">{name}</div>
+  <div class="meta">Personal Performance Report · All Sessions</div>
+  <div class="summary">
+    <div class="card"><div class="card-label">Total Sessions</div><div class="card-val">{total_sessions}</div></div>
+    <div class="card"><div class="card-label">Average Accuracy</div><div class="card-val">{avg_pct}%</div></div>
+    <div class="card"><div class="card-label">Best Score</div><div class="card-val">{best.get("pct","—")}%</div></div>
+    <div class="card"><div class="card-label">Best Competition</div><div class="card-val" style="font-size:14px;">{best.get("competition","—")}</div></div>
+  </div>
+  <table>
+    <tr><th>Date</th><th>Competition</th><th>Difficulty</th><th style="text-align:center;">Score</th><th style="text-align:center;">Accuracy</th><th>Topic Breakdown</th></tr>
+    {rows if rows else '<tr><td colspan="6" style="text-align:center;padding:24px;color:#8898CC;">No sessions yet</td></tr>'}
+  </table>
+</div>
+<div class="footer">© Math Mission Thailand 2026 · MathComp Platform · Confidential</div>
+</body></html>"""
+    return html.encode("utf-8")
+
+
+# ══════════════════════════════════════════════
+# Page: My History (student)
+# ══════════════════════════════════════════════
+def page_history():
+    require_auth(); inject_css()
+    uid  = st.session_state["uid"]
+    name = st.session_state.get("display_name","Student")
+    topbar("My History")
+
+    try:
+        sessions = [s.to_dict() for s in
+                    db.collection("users").document(uid)
+                    .collection("exam_sessions")
+                    .order_by("timestamp_start",direction=firestore.Query.DESCENDING)
+                    .limit(100).stream()]
+    except Exception as e:
+        st.error(f"Error loading history: {e}"); sessions=[]
+
+    st.markdown(f"""
+    <div class="mc-hero">
+      <div class="mc-hero-eyebrow">Performance history</div>
+      <div class="mc-hero-title">{name}'s <em>results</em></div>
+      <div class="mc-metrics">
+        <div class="mc-metric"><div class="mc-metric-label">Sessions</div>
+          <div class="mc-metric-val">{len(sessions)}</div></div>
+        <div class="mc-metric"><div class="mc-metric-label">Avg Accuracy</div>
+          <div class="mc-metric-val">{round(sum(s.get("pct",0) for s in sessions)/len(sessions),1) if sessions else 0}%</div></div>
+        <div class="mc-metric"><div class="mc-metric-label">Best Score</div>
+          <div class="mc-metric-val">{max((s.get("pct",0) for s in sessions),default=0)}%</div></div>
+        <div class="mc-metric"><div class="mc-metric-label">Competitions</div>
+          <div class="mc-metric-val">{len(set(s.get("competition","") for s in sessions))}</div></div>
+      </div>
+    </div>
+    <div class="mc-body">""", unsafe_allow_html=True)
+
+    # Download buttons
+    col_dl1, col_dl2, _ = st.columns([1,1,2])
+    with col_dl1:
+        if sessions:
+            html_bytes = generate_pdf_report(name, sessions)
+            st.download_button(
+                "📄  Download HTML Report",
+                data=html_bytes,
+                file_name=f"mathcomp_report_{name.replace(' ','_')}_{datetime.now().strftime('%Y%m%d')}.html",
+                mime="text/html",
+                use_container_width=True,
+            )
+    with col_dl2:
+        if sessions:
+            # CSV export
+            rows_csv = []
+            for s in sessions:
+                ts  = s.get("timestamp_start"); tbd = s.get("topic_breakdown",{})
+                rows_csv.append({
+                    "date": ts.strftime("%Y-%m-%d") if ts else "",
+                    "competition": s.get("competition",""), "level": s.get("level",""),
+                    "difficulty": s.get("difficulty",""), "score": s.get("raw_score",""),
+                    "max": s.get("max_score",""), "pct": s.get("pct",""),
+                    "duration_sec": s.get("duration_sec",""),
+                    **{t.lower().replace(" ","_")+"_pct":
+                       round(v["correct"]/v["total"]*100) if v["total"]>0 else ""
+                       for t,v in tbd.items()},
+                })
+            buf = io.StringIO()
+            w   = csv.DictWriter(buf, fieldnames=rows_csv[0].keys())
+            w.writeheader(); w.writerows(rows_csv)
+            st.download_button(
+                "📊  Download CSV",
+                data=buf.getvalue().encode(),
+                file_name=f"mathcomp_scores_{name.replace(' ','_')}_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+    st.divider()
+
+    # Filter
+    comps = sorted(set(s.get("competition","") for s in sessions))
+    flt   = st.selectbox("Filter by competition", ["All"] + comps, key="hist_filter")
+    show  = [s for s in sessions if flt=="All" or s.get("competition","")==flt]
+
+    if not show:
+        st.info("No sessions found.")
+    else:
+        for s in show:
+            ts   = s.get("timestamp_start"); dt = ts.strftime("%d %b %Y  %H:%M") if ts else "—"
+            pct  = s.get("pct",0)
+            tbd  = s.get("topic_breakdown",{})
+            dot  = "🟢" if pct>=70 else ("🟡" if pct>=50 else "🔴")
+            with st.expander(f"{dot}  {s.get('competition','')} · {s.get('level','')} · {s.get('difficulty','').capitalize()} · **{s.get('raw_score','')} / {s.get('max_score','')}** ({pct}%) · {dt}"):
+                c1,c2 = st.columns(2)
+                with c1:
+                    st.markdown("**Topic breakdown**")
+                    for topic,v in tbd.items():
+                        tp = round(v["correct"]/v["total"]*100) if v["total"]>0 else 0
+                        color = "#4A7CF7" if tp>=50 else "#F472B6"
+                        st.markdown(
+                            f'<div class="mc-topic-row"><span class="mc-topic-name">{topic}</span>'
+                            f'<div class="mc-bar-bg"><div class="mc-bar-fill" style="width:{tp}%;background:{color};"></div></div>'
+                            f'<span class="mc-bar-pct">{tp}%</span></div>',
+                            unsafe_allow_html=True)
+                with c2:
+                    dur = s.get("duration_sec",0)
+                    st.markdown(f"**Duration:** {dur//60}m {dur%60}s")
+                    st.markdown(f"**Questions:** {s.get('total_questions','—')}")
+                    correct = sum(1 for a in s.get("answers",{}).values() if a.get("is_correct"))
+                    wrong   = sum(1 for a in s.get("answers",{}).values() if not a.get("is_correct") and a.get("chosen"))
+                    blank   = sum(1 for a in s.get("answers",{}).values() if not a.get("chosen"))
+                    st.markdown(f"✅ {correct} correct &nbsp; ❌ {wrong} wrong &nbsp; ⬜ {blank} blank")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+    footer()
+
+
+# ══════════════════════════════════════════════
+# Page: Leaderboard (student)
+# ══════════════════════════════════════════════
+def page_leaderboard():
+    require_auth(); inject_css()
+    topbar("Leaderboard")
+
+    st.markdown("""
+    <div class="mc-hero">
+      <div class="mc-hero-eyebrow">Global ranking</div>
+      <div class="mc-hero-title">Student <em>Leaderboard</em></div>
+    </div>
+    <div class="mc-body">""", unsafe_allow_html=True)
+
+    comp_options = ["All"] + list(COMPETITIONS.keys())
+    c1,c2 = st.columns(2)
+    lb_comp   = c1.selectbox("Competition", comp_options, key="lb_comp")
+    lb_metric = c2.selectbox("Rank by", ["Best accuracy (%)","Best raw score","Most sessions"], key="lb_metric")
+
+    if st.button("🔄  Load leaderboard", type="primary"):
+        st.session_state["lb_loaded"] = True
+
+    if st.session_state.get("lb_loaded"):
+        with st.spinner("Loading…"):
+            try:
+                scores = []
+                for u in db.collection("users").stream():
+                    uid  = u.id; prof = u.to_dict()
+                    if prof.get("role") == "admin": continue
+                    name = prof.get("display_name","—")
+                    sref = db.collection("users").document(uid).collection("exam_sessions")
+                    if lb_comp != "All":
+                        sref = sref.where("competition","==",lb_comp)
+                    sess = [s.to_dict() for s in sref.stream()]
+                    if not sess: continue
+                    best_pct   = max(s.get("pct",0) for s in sess)
+                    best_score = max(s.get("raw_score",0) for s in sess)
+                    n_sess     = len(sess)
+                    avg_pct    = round(sum(s.get("pct",0) for s in sess)/n_sess,1)
+                    scores.append({"name":name,"best_pct":best_pct,"best_score":best_score,
+                                   "n_sess":n_sess,"avg_pct":avg_pct,"uid":uid})
+
+                # Sort
+                if lb_metric == "Best accuracy (%)":
+                    scores.sort(key=lambda x:x["best_pct"], reverse=True)
+                elif lb_metric == "Best raw score":
+                    scores.sort(key=lambda x:x["best_score"], reverse=True)
+                else:
+                    scores.sort(key=lambda x:x["n_sess"], reverse=True)
+
+                if not scores:
+                    st.info("No data found.")
+                else:
+                    my_uid = st.session_state.get("uid","")
+                    st.markdown(f"**{len(scores)} students ranked**")
+                    st.divider()
+                    for rank, s in enumerate(scores, 1):
+                        medal = "🥇" if rank==1 else ("🥈" if rank==2 else ("🥉" if rank==3 else f"**#{rank}**"))
+                        is_me = s["uid"] == my_uid
+                        bg    = "background:#EEF3FF;border-radius:8px;padding:4px 8px;" if is_me else ""
+                        c1,c2,c3,c4,c5 = st.columns([1,4,2,2,2])
+                        c1.markdown(medal)
+                        c2.markdown(f'<span style="{bg}">{"**" if is_me else ""}{s["name"]}{"** ← You" if is_me else ""}</span>', unsafe_allow_html=True)
+                        c3.markdown(f"Best: **{s['best_pct']}%**")
+                        c4.markdown(f"Avg: {s['avg_pct']}%")
+                        c5.markdown(f"{s['n_sess']} session{'s' if s['n_sess']!=1 else ''}")
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+    footer()
+
+
+# ══════════════════════════════════════════════
+# Page: Admin Analytics Dashboard
+# ══════════════════════════════════════════════
+def page_admin_analytics():
+    require_auth(); require_admin(); inject_css()
+    topbar("Analytics Dashboard")
+
+    st.markdown("""
+    <div class="mc-hero">
+      <div class="mc-hero-eyebrow">Admin overview</div>
+      <div class="mc-hero-title">Analytics <em>Dashboard</em></div>
+    </div>
+    <div class="mc-body">""", unsafe_allow_html=True)
+
+    if st.button("🔄  Load analytics", type="primary", key="load_analytics"):
+        st.session_state["analytics_loaded"] = True
+
+    if not st.session_state.get("analytics_loaded"):
+        st.info("Click 'Load analytics' to fetch data from Firestore.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        footer(); return
+
+    with st.spinner("Loading all student data…"):
+        try:
+            all_users    = [{"uid":d.id,**d.to_dict()} for d in db.collection("users").stream()]
+            students     = [u for u in all_users if u.get("role")!="admin"]
+            all_sessions = []
+            for u in students:
+                for s in db.collection("users").document(u["uid"]).collection("exam_sessions").stream():
+                    sd = s.to_dict()
+                    sd["student_name"]  = u.get("display_name","—")
+                    sd["student_email"] = u.get("email","—")
+                    all_sessions.append(sd)
+        except Exception as e:
+            st.error(f"Error: {e}"); st.markdown("</div>",unsafe_allow_html=True); footer(); return
+
+    # ── Summary metrics ────────────────────────
+    n_students  = len(students)
+    n_sessions  = len(all_sessions)
+    avg_pct     = round(sum(s.get("pct",0) for s in all_sessions)/n_sessions,1) if all_sessions else 0
+    completion  = round(sum(1 for s in all_sessions if s.get("pct",0)>0)/n_sessions*100) if all_sessions else 0
+
+    c1,c2,c3,c4 = st.columns(4)
+    c1.metric("Total Students",   n_students)
+    c2.metric("Total Sessions",   n_sessions)
+    c3.metric("Avg Accuracy",     f"{avg_pct}%")
+    c4.metric("Completion Rate",  f"{completion}%")
+    st.divider()
+
+    # ── Topic weakness heatmap ─────────────────
+    col_l, col_r = st.columns(2)
+
+    with col_l:
+        st.markdown("#### 📊 Class average by topic")
+        topic_totals = {t:{"correct":0,"total":0} for t in TOPICS}
+        for s in all_sessions:
+            for t,v in s.get("topic_breakdown",{}).items():
+                if t in topic_totals:
+                    topic_totals[t]["correct"] += v.get("correct",0)
+                    topic_totals[t]["total"]   += v.get("total",0)
+        fig_bar = go.Figure()
+        labels, vals, colors = [],[],[]
+        for t,v in topic_totals.items():
+            pct = round(v["correct"]/v["total"]*100) if v["total"]>0 else 0
+            labels.append(t); vals.append(pct)
+            colors.append("#4A7CF7" if pct>=60 else ("#F5A623" if pct>=40 else "#F472B6"))
+        fig_bar.add_trace(go.Bar(x=labels,y=vals,marker_color=colors,text=[f"{v}%" for v in vals],textposition="outside"))
+        fig_bar.update_layout(yaxis=dict(range=[0,110],title="Accuracy %"),
+                              xaxis_title="Topic",showlegend=False,
+                              paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(248,249,255,1)",
+                              height=320,margin=dict(t=20,b=20))
+        st.plotly_chart(fig_bar,use_container_width=True)
+
+    with col_r:
+        st.markdown("#### 📈 Sessions over time")
+        from collections import Counter
+        date_counts = Counter()
+        for s in all_sessions:
+            ts = s.get("timestamp_start")
+            if ts: date_counts[ts.strftime("%Y-%m-%d")] += 1
+        if date_counts:
+            dates = sorted(date_counts.keys())
+            counts= [date_counts[d] for d in dates]
+            fig_line = go.Figure()
+            fig_line.add_trace(go.Scatter(x=dates,y=counts,mode="lines+markers",
+                line=dict(color="#4A7CF7",width=2),marker=dict(size=6,color="#4A7CF7"),fill="tozeroy",
+                fillcolor="rgba(74,124,247,0.08)"))
+            fig_line.update_layout(xaxis_title="Date",yaxis_title="Sessions",
+                paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(248,249,255,1)",
+                height=320,margin=dict(t=20,b=20))
+            st.plotly_chart(fig_line,use_container_width=True)
+        else:
+            st.info("No session timeline data yet.")
+
+    st.divider()
+
+    # ── At-risk students ───────────────────────
+    st.markdown("#### ⚠️ Students needing attention (accuracy < 50%)")
+    at_risk = {}
+    for s in all_sessions:
+        nm = s.get("student_name","—")
+        if nm not in at_risk: at_risk[nm] = []
+        at_risk[nm].append(s.get("pct",0))
+
+    at_risk_list = [(nm, round(sum(v)/len(v),1), len(v))
+                    for nm,v in at_risk.items() if sum(v)/len(v)<50]
+    at_risk_list.sort(key=lambda x:x[1])
+
+    if at_risk_list:
+        for nm,avg,n in at_risk_list:
+            c1,c2,c3 = st.columns([4,2,2])
+            c1.markdown(f"**{nm}**")
+            c2.markdown(f"Avg accuracy: 🔴 **{avg}%**")
+            c3.markdown(f"{n} session{'s' if n!=1 else ''}")
+    else:
+        st.success("All students are performing at 50%+ — great job! 🎉")
+
+    st.divider()
+
+    # ── Competition popularity ─────────────────
+    st.markdown("#### 🏆 Most popular competitions")
+    from collections import Counter as _Counter
+    comp_counts = _Counter(s.get("competition","?") for s in all_sessions)
+    for comp,count in comp_counts.most_common():
+        avg = round(sum(s.get("pct",0) for s in all_sessions if s.get("competition","")==comp)
+                    / count, 1)
+        c1,c2,c3 = st.columns([4,2,2])
+        c1.markdown(f"**{comp}**")
+        c2.markdown(f"{count} sessions")
+        c3.markdown(f"Avg accuracy: {avg}%")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+    footer()
+
+
 # ══════════════════════════════════════════════
 # Sidebar
 # ══════════════════════════════════════════════
@@ -1819,9 +2290,13 @@ def render_sidebar():
         st.markdown(f"**{st.session_state.get('display_name','')}**")
         st.caption(st.session_state.get("role","student").capitalize())
         st.divider()
-        if st.button("🏠  Dashboard",  use_container_width=True): st.session_state["page"]="dashboard"; st.rerun()
+        if st.button("🏠  Dashboard",       use_container_width=True): st.session_state["page"]="dashboard";   st.rerun()
+        if st.button("📋  My History",       use_container_width=True): st.session_state["page"]="history";     st.rerun()
+        if st.button("🏆  Leaderboard",      use_container_width=True): st.session_state["page"]="leaderboard"; st.rerun()
         if st.session_state.get("role")=="admin":
-            if st.button("⚙️  Admin Panel", use_container_width=True): st.session_state["page"]="admin"; st.rerun()
+            st.divider()
+            if st.button("⚙️  Admin Panel",      use_container_width=True): st.session_state["page"]="admin";            st.rerun()
+            if st.button("📊  Analytics",        use_container_width=True): st.session_state["page"]="admin_analytics";  st.rerun()
         st.divider()
         if st.button("Log out", use_container_width=True): st.session_state.clear(); st.rerun()
         st.markdown("---")
@@ -1833,13 +2308,36 @@ def render_sidebar():
 # ══════════════════════════════════════════════
 def main():
     if "page" not in st.session_state: st.session_state["page"]="login"
+
+    # Handle direct competition link: ?comp=AMC10&level=AMC+10A
+    params = st.query_params
+    if "comp" in params and "uid" not in st.session_state:
+        st.session_state["pending_comp"]  = params.get("comp","")
+        st.session_state["pending_level"] = params.get("level","")
+
     render_sidebar()
     page = st.session_state["page"]
-    if   page=="login":     page_login()
-    elif page=="dashboard": page_dashboard()
-    elif page=="exam":      page_exam()
-    elif page=="result":    page_result()
-    elif page=="admin":     page_admin()
+
+    # After login, redirect to competition if pending
+    if "uid" in st.session_state and st.session_state.get("pending_comp"):
+        comp  = st.session_state.pop("pending_comp","")
+        level = st.session_state.pop("pending_level","")
+        if comp in COMPETITIONS:
+            st.session_state.update({
+                "page":"dashboard",
+                "_prefill_comp":comp,
+                "_prefill_level":level,
+            })
+            st.rerun()
+
+    if   page=="login":            page_login()
+    elif page=="dashboard":        page_dashboard()
+    elif page=="exam":             page_exam()
+    elif page=="result":           page_result()
+    elif page=="admin":            page_admin()
+    elif page=="history":          page_history()
+    elif page=="leaderboard":      page_leaderboard()
+    elif page=="admin_analytics":  page_admin_analytics()
     else:
         st.error(f"Unknown page: {page}")
         st.session_state["page"]="login"; st.rerun()
