@@ -1530,46 +1530,127 @@ def page_admin():
             horizontal=True, key="import_method")
         st.divider()
 
-        # ── AI difficulty + topic assessor ──────
-        def ai_assess_question(q_text:str="", img_b64:str="", img_mime:str="", competition:str="") -> dict:
-            """Ask Claude to identify difficulty and topic for a question."""
-            api_key = st.secrets.get("ANTHROPIC_API_KEY","")
-            if not api_key:
-                return {}
-            content_parts = []
-            if img_b64:
-                content_parts.append({"type":"image","source":{"type":"base64","media_type":img_mime,"data":img_b64}})
-            if q_text:
-                content_parts.append({"type":"text","text":q_text})
-            content_parts.append({"type":"text","text":
-                f"""You are an expert mathematics competition coach.
-Analyse this mathematics competition question for {competition or "a math competition"}.
+        # ── AI helpers ────────────────────────────
+        API_KEY = st.secrets.get("ANTHROPIC_API_KEY","")
+        AI_HEADERS = {
+            "Content-Type":    "application/json",
+            "x-api-key":       API_KEY,
+            "anthropic-version":"2023-06-01",
+        }
 
-Respond ONLY with a JSON object (no markdown, no explanation) with exactly these fields:
-{{
-  "difficulty": "easy" | "intermediate" | "advanced",
-  "topic": "Algebra" | "Number Theory" | "Geometry" | "Combinatorics" | "Word Problem" | "Other",
-  "difficulty_reason": "one sentence explaining why",
-  "topic_reason": "one sentence explaining why"
-}}"""
-            })
+        def ai_call(messages:list, max_tokens:int=1500) -> str | None:
+            """Make a Claude API call; return text or None."""
+            if not API_KEY: return None
             try:
                 resp = requests.post(
                     "https://api.anthropic.com/v1/messages",
-                    headers={"Content-Type":"application/json",
-                             "x-api-key":api_key,
-                             "anthropic-version":"2023-06-01"},
-                    json={"model":"claude-sonnet-4-5","max_tokens":200,
-                          "messages":[{"role":"user","content":content_parts}]},
-                    timeout=20,
+                    headers=AI_HEADERS,
+                    json={"model":"claude-sonnet-4-5","max_tokens":max_tokens,"messages":messages},
+                    timeout=45,
                 )
-                if resp.ok:
-                    raw = resp.json()["content"][0]["text"].strip()
-                    raw = raw.replace("```json","").replace("```","").strip()
-                    return json.loads(raw)
+                if resp.ok: return resp.json()["content"][0]["text"].strip()
+                st.warning(f"AI call failed: {resp.status_code}")
             except Exception as e:
-                st.warning(f"AI assessment error: {e}")
+                st.warning(f"AI error: {e}")
+            return None
+
+        def ai_assess_question(q_text:str="", img_b64:str="", img_mime:str="", competition:str="") -> dict:
+            """Ask Claude to identify difficulty and topic for a question."""
+            parts = []
+            if img_b64: parts.append({"type":"image","source":{"type":"base64","media_type":img_mime,"data":img_b64}})
+            if q_text:  parts.append({"type":"text","text":q_text})
+            parts.append({"type":"text","text":
+                f"""You are an expert mathematics competition coach.
+Analyse this question for {competition or "a math competition"}.
+Respond ONLY with a JSON object with exactly these fields:
+{{
+  "difficulty": "easy" | "intermediate" | "advanced",
+  "topic": "Algebra" | "Number Theory" | "Geometry" | "Combinatorics" | "Word Problem" | "Other",
+  "difficulty_reason": "one sentence",
+  "topic_reason": "one sentence"
+}}"""
+            })
+            raw = ai_call([{"role":"user","content":parts}], max_tokens=200)
+            if raw:
+                try:
+                    return json.loads(raw.replace("```json","").replace("```","").strip())
+                except: pass
             return {}
+
+        def ai_full_extract(img_b64:str, img_mime:str, competition:str, answer_type:str) -> dict:
+            """
+            Full extraction from a question image:
+            - question text (LaTeX)
+            - multiple choice options (if present)
+            - correct answer
+            - topic + difficulty
+            - worked solution
+            Returns a dict with all fields.
+            """
+            n_choices = 4 if answer_type=="mc4" else (5 if answer_type=="mc5" else 0)
+            choice_instruction = (
+                f"Extract the {n_choices} multiple choice options labelled A–{chr(64+n_choices)} exactly as written."
+                if n_choices > 0 else
+                "There are no multiple choice options — the answer is a number."
+            )
+            prompt = f"""You are an expert mathematics competition coach for {competition or "math competitions"}.
+
+Read this question image carefully and extract EVERYTHING.
+
+{choice_instruction}
+
+Respond ONLY with a valid JSON object (no markdown, no extra text):
+{{
+  "question_text": "full question in LaTeX — use $...$ inline, $$...$$ for display",
+  "choices": ["choice A text", "choice B text", ...],
+  "correct_answer": "A" or "B" ... or numeric string if no choices,
+  "topic": "Algebra" | "Number Theory" | "Geometry" | "Combinatorics" | "Word Problem" | "Other",
+  "difficulty": "easy" | "intermediate" | "advanced",
+  "difficulty_reason": "one sentence",
+  "topic_reason": "one sentence",
+  "solution_text": "full worked solution in LaTeX — step by step, show all working"
+}}
+
+Rules:
+- Use LaTeX for ALL mathematical expressions
+- For choices: include ONLY the text/expression, NOT the letter label
+- solution_text must be a complete worked solution showing every step
+- If the image is unclear about any field, make your best educated guess"""
+
+            raw = ai_call([{"role":"user","content":[
+                {"type":"image","source":{"type":"base64","media_type":img_mime,"data":img_b64}},
+                {"type":"text","text":prompt}
+            ]}], max_tokens=2000)
+
+            if raw:
+                try:
+                    return json.loads(raw.replace("```json","").replace("```","").strip())
+                except Exception as e:
+                    st.warning(f"Could not parse AI response: {e}")
+                    # Return partial result with raw text
+                    return {"question_text": raw, "choices":[], "correct_answer":"",
+                            "topic":"Other","difficulty":"intermediate","solution_text":""}
+            return {}
+
+        def ai_generate_solution(q_text:str, choices:list, correct:str, competition:str) -> str:
+            """Generate a worked solution for a typed/existing question."""
+            choices_str = ""
+            if choices:
+                labels = [chr(65+i) for i in range(len(choices))]
+                choices_str = "\n".join(f"{labels[i]}. {choices[i]}" for i in range(len(choices)))
+                choices_str = f"\n\nAnswer choices:\n{choices_str}\n\nCorrect answer: {correct}"
+            prompt = f"""You are an expert mathematics competition coach.
+
+Write a complete, step-by-step worked solution for this competition mathematics question.
+Use LaTeX for all mathematical expressions ($...$ inline, $$...$$ display).
+Show every step clearly. Competition: {competition or "math competition"}.
+
+Question:
+{q_text}{choices_str}
+
+Provide a thorough solution that a student can learn from."""
+
+            return ai_call([{"role":"user","content":prompt}], max_tokens=1500) or ""
 
         def meta_fields(p="", q_text_for_ai="", img_b64_for_ai="", img_mime_for_ai=""):
             c1,c2 = st.columns(2)
@@ -1643,16 +1724,34 @@ Respond ONLY with a JSON object (no markdown, no explanation) with exactly these
             if q_text:
                 with st.expander("Preview"): st.markdown(q_text)
             choices,correct = ans_fields(atype,"t_")
-            sol_text,sol_img = sol_fields("t_")
+
+            # AI generate solution
+            st.markdown("**Solution**")
+            sc1,sc2 = st.columns([3,1])
+            t_sol = sc1.text_area("Solution text / LaTeX (optional)", height=100, key="t_sol_text")
+            t_sol_img = sc2.file_uploader("Solution image", type=["png","jpg","jpeg"], key="t_sol_img")
+            if q_text and st.button("🤖  AI generate solution", key="t_gen_sol"):
+                with st.spinner("Claude is writing a solution…"):
+                    ch_list = [st.session_state.get(f"t_ch{i}","") for i in range(4 if atype=="mc4" else 5)] if atype in ("mc4","mc5") else []
+                    sol_generated = ai_generate_solution(q_text, ch_list, st.session_state.get("t_correct",""), comp)
+                    if sol_generated:
+                        st.session_state["t_sol_generated"] = sol_generated
+                        st.rerun()
+            if st.session_state.get("t_sol_generated") and not t_sol:
+                t_sol = st.session_state["t_sol_generated"]
+                st.markdown("**Generated solution preview:**")
+                st.markdown(t_sol)
+
             if st.button("💾  Save question", type="primary", key="t_save"):
                 if not q_text: st.error("Question text is required.")
                 else:
                     with st.spinner("Saving…"):
                         q_url = upload_img(q_img,f"questions/{datetime.now().timestamp()}_q.{q_img.name.split('.')[-1]}") if q_img else ""
                         s_url = upload_img(sol_img,f"solutions/{datetime.now().timestamp()}_s.{sol_img.name.split('.')[-1]}") if sol_img else ""
+                        final_sol = t_sol or st.session_state.pop("t_sol_generated","")  
                         save_question({"competition":comp,"level":level,"topic":topic,"difficulty":diff,"year":year,
                                        "answer_type":atype,"question_text":q_text,"question_image_url":q_url,
-                                       "choices":choices,"correct_answer":correct,"solution_text":sol_text,"solution_image_url":s_url})
+                                       "choices":choices,"correct_answer":correct,"solution_text":final_sol,"solution_image_url":s_url})
                     st.success("✅  Question saved!")
 
         # Method 2 — Image
@@ -1674,55 +1773,125 @@ Respond ONLY with a JSON object (no markdown, no explanation) with exactly these
                                        "choices":choices,"correct_answer":correct,"solution_text":sol_text,"solution_image_url":s_url})
                     st.success("✅  Question saved!")
 
-        # Method 3 — AI-OCR
+        # Method 3 — AI-OCR (full extract: question + choices + solution)
         elif method == "🤖  AI-OCR from image":
-            st.markdown("#### AI reads image → LaTeX")
-            ai_img_pre = st.session_state.get('ai_qimg')
-            ai_b64_pre,ai_mime_pre = ("","")
-            if ai_img_pre:
-                try:
-                    ai_img_pre.seek(0)
-                    ai_b64_pre = base64.b64encode(ai_img_pre.read()).decode()
-                    ai_mime_pre = "image/jpeg" if ai_img_pre.name.lower().endswith(('jpg','jpeg')) else f"image/{ai_img_pre.name.split('.')[-1]}"
-                    ai_img_pre.seek(0)
-                except: pass
-            ai_txt_pre = st.session_state.get('ai_qtext','')
-            comp,level,topic,diff,year,atype = meta_fields("ai_",q_text_for_ai=ai_txt_pre,img_b64_for_ai=ai_b64_pre,img_mime_for_ai=ai_mime_pre)
+            st.markdown("#### AI reads image — extracts question, choices, correct answer & solution")
+            st.caption("Claude reads the full image and fills in all fields automatically. Review and edit before saving.")
+
+            comp,level,topic,diff,year,atype = meta_fields("ai_")
+
             q_img = st.file_uploader("Question image", type=["png","jpg","jpeg"], key="ai_qimg")
-            if q_img: st.image(q_img, caption="Uploaded", use_container_width=True)
-            if q_img and st.button("🤖  Run AI-OCR", key="ai_ocr"):
-                with st.spinner("Claude is reading the image…"):
+            if q_img:
+                st.image(q_img, caption="Uploaded image", use_container_width=True)
+
+            if q_img and st.button("🤖  Full AI Extract (question + choices + solution)", type="primary", key="ai_ocr"):
+                with st.spinner("Claude is reading the image — extracting everything…"):
                     try:
+                        q_img.seek(0)
                         img_b64 = base64.b64encode(q_img.read()).decode()
                         ext  = q_img.name.split(".")[-1].lower()
                         mime = "image/jpeg" if ext in ("jpg","jpeg") else f"image/{ext}"
-                        resp = requests.post("https://api.anthropic.com/v1/messages",
-                            headers={"Content-Type":"application/json","x-api-key":st.secrets.get("ANTHROPIC_API_KEY",""),"anthropic-version":"2023-06-01"},
-                            json={"model":"claude-sonnet-4-5","max_tokens":1000,
-                                  "messages":[{"role":"user","content":[
-                                      {"type":"image","source":{"type":"base64","media_type":mime,"data":img_b64}},
-                                      {"type":"text","text":"Extract the math question from this image. Rewrite it using LaTeX ($...$ for inline, $$...$$ for display). Output ONLY the question text."}
-                                  ]}]},timeout=30)
-                        if resp.ok: st.session_state["ai_ocr_result"]=resp.json()["content"][0]["text"]
-                        else: st.error(f"AI OCR failed: {resp.status_code}")
-                    except Exception as e: st.error(f"Error: {e}")
+                        result = ai_full_extract(img_b64, mime, comp, atype)
+                        if result:
+                            st.session_state["ai_full"] = result
+                            st.success("✅  Extraction complete — review fields below and edit if needed.")
+                        else:
+                            st.error("Extraction failed. Check your ANTHROPIC_API_KEY.")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
 
-            q_text = st.text_area("Extracted text (edit if needed)", value=st.session_state.get("ai_ocr_result",""), height=140, key="ai_qtext")
+            # Pull extracted values (or empty defaults)
+            extracted = st.session_state.get("ai_full", {})
+            if extracted:
+                st.markdown("""
+                <div style='background:#EEF3FF;border:1.5px solid #C8D8FF;border-radius:10px;
+                            padding:12px 16px;margin-bottom:12px;font-size:13px;color:#1B2B6B;'>
+                🤖 <strong>AI extracted all fields below.</strong>
+                Review each field carefully — edit anything that needs correction before saving.
+                </div>""", unsafe_allow_html=True)
+
+            # ── Editable fields pre-filled by AI ──
+            q_text = st.text_area(
+                "Question text (LaTeX)",
+                value=extracted.get("question_text", st.session_state.get("ai_ocr_result","")),
+                height=140, key="ai_qtext")
             if q_text:
-                with st.expander("Preview"): st.markdown(q_text)
-            choices,correct = ans_fields(atype,"ai_")
-            sol_text,sol_img = sol_fields("ai_")
+                with st.expander("Preview question"): st.markdown(q_text)
+
+            # Override topic/diff from AI extraction
+            if extracted.get("topic") and extracted["topic"] in TOPICS+["Other"]:
+                st.session_state["ai_topic_override"] = extracted["topic"]
+            if extracted.get("difficulty") and extracted["difficulty"] in ["easy","intermediate","advanced"]:
+                st.session_state["ai_diff_override"] = extracted["difficulty"]
+
+            topic_opts = TOPICS+["Other"]
+            diff_opts  = ["easy","intermediate","advanced"]
+            ov_topic = st.session_state.get("ai_topic_override", extracted.get("topic","Algebra"))
+            ov_diff  = st.session_state.get("ai_diff_override",  extracted.get("difficulty","intermediate"))
+            ti = topic_opts.index(ov_topic) if ov_topic in topic_opts else 0
+            di = diff_opts.index(ov_diff)   if ov_diff  in diff_opts  else 1
+
+            tc1,tc2 = st.columns(2)
+            topic_final = tc1.selectbox("Topic",    topic_opts, index=ti, key="ai_topic_sel")
+            diff_final  = tc2.selectbox("Difficulty",diff_opts, index=di, key="ai_diff_sel")
+            if extracted.get("topic_reason") or extracted.get("difficulty_reason"):
+                st.caption(f"🤖 {extracted.get('topic_reason','')} · {extracted.get('difficulty_reason','')}")
+
+            # ── Answer choices from AI ──
+            ai_choices  = extracted.get("choices", [])
+            ai_correct  = str(extracted.get("correct_answer",""))
+            choices, correct = [], ""
+
+            if atype in ("mc4","mc5"):
+                n = 4 if atype=="mc4" else 5
+                st.markdown("**Answer choices** (AI-filled — edit if needed)")
+                ch_cols = st.columns(n)
+                for i in range(n):
+                    pre = ai_choices[i] if i < len(ai_choices) else ""
+                    choices.append(ch_cols[i].text_input(chr(65+i), value=pre, key=f"ai_ch{i}"))
+                labels = [chr(65+i) for i in range(n)]
+                idx_c = labels.index(ai_correct.upper()) if ai_correct.upper() in labels else 0
+                correct = st.selectbox("Correct answer", labels, index=idx_c, key="ai_correct_mc")
+            else:
+                correct = st.text_input("Correct answer (number)", value=ai_correct, key="ai_correct_num")
+
+            # ── Solution from AI ──
+            st.markdown("**Solution** (AI-generated — edit if needed)")
+            sol_text = st.text_area(
+                "Solution text (LaTeX)",
+                value=extracted.get("solution_text",""),
+                height=180, key="ai_sol_text")
+            if sol_text:
+                with st.expander("Preview solution"): st.markdown(sol_text)
+            sol_img = st.file_uploader("Solution image (optional)", type=["png","jpg","jpeg"], key="ai_sol_img")
+
+            # ── Generate solution separately if needed ──
+            if q_text and st.button("🔄  Re-generate solution only", key="ai_regen_sol"):
+                with st.spinner("Claude is writing a solution…"):
+                    new_sol = ai_generate_solution(q_text, choices, correct, comp)
+                    if new_sol:
+                        extracted["solution_text"] = new_sol
+                        st.session_state["ai_full"] = extracted
+                        st.rerun()
+
             if st.button("💾  Save question", type="primary", key="ai_save"):
                 if not q_text: st.error("Question text is required.")
                 else:
                     with st.spinner("Saving…"):
+                        ts = datetime.now().timestamp()
                         if q_img: q_img.seek(0)
-                        q_url = upload_img(q_img,f"questions/{datetime.now().timestamp()}_q.{q_img.name.split('.')[-1]}") if q_img else ""
-                        s_url = upload_img(sol_img,f"solutions/{datetime.now().timestamp()}_s.{sol_img.name.split('.')[-1]}") if sol_img else ""
-                        save_question({"competition":comp,"level":level,"topic":topic,"difficulty":diff,"year":year,
-                                       "answer_type":atype,"question_text":q_text,"question_image_url":q_url,
-                                       "choices":choices,"correct_answer":correct,"solution_text":sol_text,"solution_image_url":s_url})
-                        st.session_state.pop("ai_ocr_result",None)
+                        q_url   = upload_img(q_img,     f"questions/{ts}_q.{q_img.name.split('.')[-1]}")     if q_img     else ""
+                        s_url   = upload_img(sol_img,   f"solutions/{ts}_s.{sol_img.name.split('.')[-1]}")   if sol_img   else ""
+                        save_question({
+                            "competition":        comp,   "level":     level,
+                            "topic":              topic_final,           "difficulty": diff_final,
+                            "year":               year,   "answer_type":atype,
+                            "question_text":      q_text, "question_image_url": q_url,
+                            "choices":            choices,"correct_answer":     str(correct),
+                            "solution_text":      sol_text,"solution_image_url":s_url,
+                        })
+                        for k in ("ai_ocr_result","ai_full","ai_topic_override","ai_diff_override"):
+                            st.session_state.pop(k,None)
                     st.success("✅  Question saved!")
 
         # Method 4 — PDF batch
@@ -1736,48 +1905,162 @@ Respond ONLY with a JSON object (no markdown, no explanation) with exactly these
             atype  = st.selectbox("Answer type (all)",["mc5","mc4","integer","decimal"],key="pdf_atype")
             pdf_file = st.file_uploader("Upload PDF", type=["pdf"], key="pdf_upload")
 
-            if pdf_file and st.button("🤖  Extract questions", key="pdf_extract"):
-                with st.spinner("Claude is reading the PDF…"):
+            if pdf_file and st.button("🤖  Extract questions from PDF", key="pdf_extract", type="primary"):
+                with st.spinner("Claude is reading the PDF — extracting questions, choices, answers and solutions…"):
                     try:
                         pdf_b64 = base64.b64encode(pdf_file.read()).decode()
-                        resp = requests.post("https://api.anthropic.com/v1/messages",
-                            headers={"Content-Type":"application/json","x-api-key":st.secrets.get("ANTHROPIC_API_KEY",""),"anthropic-version":"2023-06-01"},
-                            json={"model":"claude-sonnet-4-5","max_tokens":4000,
-                                  "messages":[{"role":"user","content":[
-                                      {"type":"document","source":{"type":"base64","media_type":"application/pdf","data":pdf_b64}},
-                                      {"type":"text","text":"Extract ALL math questions from this PDF. Return a JSON array with objects: question_text (LaTeX), topic (Algebra/Number Theory/Geometry/Combinatorics/Word Problem/Other), choices (array or []), correct_answer. Output ONLY valid JSON array."}
-                                  ]}]},timeout=60)
-                        if resp.ok:
-                            raw = resp.json()["content"][0]["text"].strip().replace("```json","").replace("```","").strip()
-                            st.session_state["pdf_questions"] = json.loads(raw)
-                            st.success(f"Extracted **{len(st.session_state['pdf_questions'])}** questions!")
-                        else: st.error(f"Failed: {resp.status_code}")
-                    except Exception as e: st.error(f"Error: {e}")
+                        n_choices_info = (
+                            f"Each question has {4 if atype=='mc4' else 5} multiple choice options labelled A–{'D' if atype=='mc4' else 'E'}."
+                            if atype in ("mc4","mc5") else
+                            "Questions have numeric answers (no multiple choice)."
+                        )
+                        pdf_prompt = f"""You are an expert mathematics competition coach.
+
+Extract ALL mathematics questions from this PDF for {comp} competition.
+{n_choices_info}
+
+For EACH question, provide:
+1. The full question text in LaTeX
+2. All answer choices exactly as written (if multiple choice)
+3. The correct answer (letter A-E or numeric)
+4. Topic classification
+5. Difficulty assessment
+6. A complete step-by-step worked solution in LaTeX
+
+Return ONLY a valid JSON array. Each element must have exactly these fields:
+{{
+  "question_text": "full question in LaTeX ($...$ inline, $$...$$ display)",
+  "choices": ["option A", "option B", ...],
+  "correct_answer": "A" or numeric string,
+  "topic": "Algebra" | "Number Theory" | "Geometry" | "Combinatorics" | "Word Problem" | "Other",
+  "difficulty": "easy" | "intermediate" | "advanced",
+  "solution_text": "complete worked solution in LaTeX"
+}}
+
+No markdown, no explanation — ONLY the JSON array."""
+
+                        raw = ai_call([{"role":"user","content":[
+                            {"type":"document","source":{"type":"base64","media_type":"application/pdf","data":pdf_b64}},
+                            {"type":"text","text":pdf_prompt}
+                        ]}], max_tokens=6000)
+
+                        if raw:
+                            clean = raw.replace("```json","").replace("```","").strip()
+                            qs_extracted = json.loads(clean)
+                            st.session_state["pdf_questions"] = qs_extracted
+                            n_with_sol = sum(1 for q in qs_extracted if q.get("solution_text","").strip())
+                            st.success(f"✅  Extracted **{len(qs_extracted)}** questions — "
+                                       f"{n_with_sol} with solutions, "
+                                       f"{sum(1 for q in qs_extracted if q.get('choices'))} with choices.")
+                        else:
+                            st.error("Extraction failed. Check your ANTHROPIC_API_KEY.")
+                    except json.JSONDecodeError as e:
+                        st.error(f"JSON parse error: {e}. Try again — Claude sometimes adds extra text.")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
 
             if "pdf_questions" in st.session_state:
                 pdf_qs = st.session_state["pdf_questions"]
+                st.markdown(f"**{len(pdf_qs)} questions extracted — review each one:**")
+
                 for i,q in enumerate(pdf_qs):
-                    with st.expander(f"Q{i+1} — {q.get('topic','?')} · {q.get('question_text','')[:60]}…"):
-                        pdf_qs[i]["question_text"] = st.text_area("Question",value=q.get("question_text",""),height=80,key=f"pdf_qt_{i}")
-                        pdf_qs[i]["topic"] = st.selectbox("Topic",TOPICS+["Other"],
-                            index=(TOPICS+["Other"]).index(q.get("topic","Other")) if q.get("topic","Other") in TOPICS+["Other"] else 0,
+                    qt_preview = q.get("question_text","")[:55]
+                    sol_icon   = "✅" if q.get("solution_text","").strip() else "⚠️"
+                    ch_icon    = f"🔤{len(q.get('choices',[]))}" if q.get("choices") else "🔢"
+                    with st.expander(
+                        f"Q{i+1} {ch_icon} [{q.get('difficulty','?')}] [{q.get('topic','?')}] {sol_icon} — {qt_preview}…"
+                    ):
+                        # Question text
+                        pdf_qs[i]["question_text"] = st.text_area(
+                            "Question text (LaTeX)", value=q.get("question_text",""),
+                            height=100, key=f"pdf_qt_{i}")
+                        with st.expander("Preview question"):
+                            st.markdown(pdf_qs[i]["question_text"])
+
+                        # Topic + difficulty
+                        pc1,pc2 = st.columns(2)
+                        t_opts = TOPICS+["Other"]
+                        d_opts = ["easy","intermediate","advanced"]
+                        pdf_qs[i]["topic"] = pc1.selectbox("Topic", t_opts,
+                            index=t_opts.index(q.get("topic","Other")) if q.get("topic") in t_opts else 0,
                             key=f"pdf_tp_{i}")
+                        pdf_qs[i]["difficulty"] = pc2.selectbox("Difficulty", d_opts,
+                            index=d_opts.index(q.get("difficulty","intermediate")) if q.get("difficulty") in d_opts else 1,
+                            key=f"pdf_df_{i}")
+
+                        # Choices
                         if atype in ("mc4","mc5"):
-                            n=4 if atype=="mc4" else 5; existing=q.get("choices",[""]*n); cols=st.columns(n); new_ch=[]
-                            for j in range(n): new_ch.append(cols[j].text_input(chr(65+j),value=existing[j] if j<len(existing) else "",key=f"pdf_ch_{i}_{j}"))
-                            pdf_qs[i]["choices"]=new_ch
-                        pdf_qs[i]["correct_answer"]=st.text_input("Correct answer",value=q.get("correct_answer",""),key=f"pdf_ca_{i}")
-                st.session_state["pdf_questions"]=pdf_qs
-                if st.button("💾  Save all to Firestore", type="primary", key="pdf_save"):
+                            n = 4 if atype=="mc4" else 5
+                            existing = q.get("choices",[""]*n)
+                            st.markdown("**Answer choices**")
+                            cols = st.columns(n); new_ch = []
+                            for j in range(n):
+                                new_ch.append(cols[j].text_input(
+                                    chr(65+j),
+                                    value=existing[j] if j < len(existing) else "",
+                                    key=f"pdf_ch_{i}_{j}"))
+                            pdf_qs[i]["choices"] = new_ch
+                            labels = [chr(65+j) for j in range(n)]
+                            ca = str(q.get("correct_answer","A")).upper()
+                            pdf_qs[i]["correct_answer"] = st.selectbox(
+                                "Correct answer", labels,
+                                index=labels.index(ca) if ca in labels else 0,
+                                key=f"pdf_ca_{i}")
+                        else:
+                            pdf_qs[i]["correct_answer"] = st.text_input(
+                                "Correct answer", value=str(q.get("correct_answer","")),
+                                key=f"pdf_ca_{i}")
+
+                        # Solution
+                        st.markdown("**Solution** (AI-generated)")
+                        pdf_qs[i]["solution_text"] = st.text_area(
+                            "Solution (LaTeX)", value=q.get("solution_text",""),
+                            height=150, key=f"pdf_sol_{i}")
+                        if pdf_qs[i]["solution_text"]:
+                            with st.expander("Preview solution"):
+                                st.markdown(pdf_qs[i]["solution_text"])
+
+                        # Re-generate solution for this question
+                        if st.button(f"🔄  Re-generate solution for Q{i+1}", key=f"pdf_regen_{i}"):
+                            with st.spinner("Generating solution…"):
+                                new_sol = ai_generate_solution(
+                                    pdf_qs[i]["question_text"],
+                                    pdf_qs[i].get("choices",[]),
+                                    str(pdf_qs[i].get("correct_answer","")),
+                                    comp
+                                )
+                                if new_sol:
+                                    pdf_qs[i]["solution_text"] = new_sol
+                                    st.session_state["pdf_questions"] = pdf_qs
+                                    st.rerun()
+
+                st.session_state["pdf_questions"] = pdf_qs
+                st.divider()
+
+                # Summary before saving
+                n_sol = sum(1 for q in pdf_qs if q.get("solution_text","").strip())
+                n_ch  = sum(1 for q in pdf_qs if q.get("choices"))
+                st.info(f"📊  Ready to save: **{len(pdf_qs)}** questions · "
+                        f"**{n_ch}** with choices · **{n_sol}** with solutions")
+
+                if st.button(f"💾  Save all {len(pdf_qs)} questions to Firestore",
+                             type="primary", key="pdf_save"):
                     with st.spinner(f"Saving {len(pdf_qs)} questions…"):
                         for q in pdf_qs:
-                            save_question({"competition":comp,"level":level,"topic":q.get("topic","Other"),
-                                           "difficulty":diff,"year":int(year),"answer_type":atype,
-                                           "question_text":q.get("question_text",""),"question_image_url":"",
-                                           "choices":q.get("choices",[]),"correct_answer":q.get("correct_answer",""),
-                                           "solution_text":"","solution_image_url":""})
+                            save_question({
+                                "competition":   comp,   "level":      level,
+                                "topic":         q.get("topic","Other"),
+                                "difficulty":    q.get("difficulty",diff),
+                                "year":          int(year), "answer_type": atype,
+                                "question_text": q.get("question_text",""),
+                                "question_image_url": "",
+                                "choices":       q.get("choices",[]),
+                                "correct_answer":str(q.get("correct_answer","")),
+                                "solution_text": q.get("solution_text",""),
+                                "solution_image_url": "",
+                            })
                     st.session_state.pop("pdf_questions",None)
-                    st.success(f"✅  {len(pdf_qs)} questions saved!")
+                    st.success(f"✅  {len(pdf_qs)} questions saved to Firestore!")
 
         # ── Question Bank Browser (Editable) ───────
         st.divider()
