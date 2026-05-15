@@ -571,6 +571,183 @@ def fetch_questions(competition, level, difficulty, n) -> list:
 def _dq(doc) -> dict:
     d = doc.to_dict(); d["id"] = doc.id; return d
 
+# ══════════════════════════════════════════════
+# Email — welcome message
+# ══════════════════════════════════════════════
+def send_welcome_email(to_email: str, display_name: str, password: str, role: str, app_url: str = "") -> tuple[bool, str]:
+    """
+    Send a welcome email with login credentials via Gmail SMTP.
+    Requires secrets: GMAIL_SENDER, GMAIL_APP_PASSWORD
+    Returns (success, message)
+    """
+    import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+
+    sender       = st.secrets.get("GMAIL_SENDER", "")
+    app_password = st.secrets.get("GMAIL_APP_PASSWORD", "")
+
+    if not sender or not app_password:
+        return False, "Email not configured (GMAIL_SENDER / GMAIL_APP_PASSWORD missing in secrets)"
+
+    if not app_url:
+        app_url = "https://share.streamlit.io"
+
+    role_label = "Administrator" if role == "admin" else "Student"
+
+    html_body = f"""
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  body {{ font-family: 'Segoe UI', Arial, sans-serif; background:#F8F9FF; margin:0; padding:0; }}
+  .container {{ max-width:560px; margin:32px auto; background:#fff;
+                border-radius:16px; overflow:hidden;
+                box-shadow:0 4px 24px rgba(27,43,107,.10); }}
+  .header {{ background:#1B2B6B; padding:32px 40px; text-align:center; }}
+  .header h1 {{ color:#fff; font-size:26px; margin:0; font-weight:300;
+                font-style:italic; letter-spacing:.02em; }}
+  .header p {{ color:rgba(255,255,255,.55); font-size:12px;
+               letter-spacing:.1em; text-transform:uppercase; margin:6px 0 0; }}
+  .body {{ padding:36px 40px; }}
+  .greeting {{ font-size:18px; color:#1B2B6B; font-weight:600; margin-bottom:8px; }}
+  .text {{ font-size:14px; color:#5060A0; line-height:1.7; margin-bottom:20px; }}
+  .cred-box {{ background:#EEF3FF; border:1.5px solid #C8D8FF;
+               border-radius:10px; padding:20px 24px; margin:20px 0; }}
+  .cred-row {{ display:flex; justify-content:space-between;
+               align-items:center; padding:6px 0;
+               border-bottom:1px solid rgba(200,216,255,.5); }}
+  .cred-row:last-child {{ border-bottom:none; }}
+  .cred-label {{ font-size:11px; color:#8898CC; text-transform:uppercase;
+                 letter-spacing:.08em; font-family:monospace; }}
+  .cred-value {{ font-size:14px; color:#1B2B6B; font-weight:600;
+                 font-family:monospace; }}
+  .btn {{ display:block; background:#1B2B6B; color:#fff !important;
+          text-decoration:none; text-align:center; padding:14px 28px;
+          border-radius:9px; font-size:15px; font-weight:600;
+          margin:24px 0 8px; letter-spacing:.02em; }}
+  .warning {{ background:#FFF8E7; border:1px solid #F9E3A0;
+              border-radius:8px; padding:12px 16px; font-size:12px;
+              color:#8B6408; margin:16px 0; line-height:1.6; }}
+  .steps {{ margin:20px 0; }}
+  .step {{ display:flex; gap:12px; align-items:flex-start; margin-bottom:12px; }}
+  .step-num {{ background:#4A7CF7; color:#fff; border-radius:50%;
+               width:22px; height:22px; display:flex; align-items:center;
+               justify-content:center; font-size:11px; font-weight:700;
+               flex-shrink:0; margin-top:1px; }}
+  .step-text {{ font-size:13px; color:#5060A0; line-height:1.6; }}
+  .footer {{ background:#F8F9FF; border-top:1px solid #E8ECF8;
+             padding:20px 40px; text-align:center; }}
+  .footer p {{ font-size:11px; color:#8898CC; margin:0; line-height:1.6; }}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>MathComp</h1>
+    <p>Math Mission Thailand · Online Mathematics Competition</p>
+  </div>
+  <div class="body">
+    <div class="greeting">Welcome, {display_name}! 🎉</div>
+    <p class="text">
+      Your MathComp account has been created. You can now log in and start
+      practising mathematics competition problems. Your account details are below.
+    </p>
+
+    <div class="cred-box">
+      <div class="cred-row">
+        <span class="cred-label">Email (username)</span>
+        <span class="cred-value">{to_email}</span>
+      </div>
+      <div class="cred-row">
+        <span class="cred-label">Password</span>
+        <span class="cred-value">{password}</span>
+      </div>
+      <div class="cred-row">
+        <span class="cred-label">Account type</span>
+        <span class="cred-value">{role_label}</span>
+      </div>
+    </div>
+
+    <a href="{app_url}" class="btn">Log in to MathComp →</a>
+
+    <div class="warning">
+      🔒 <strong>Important:</strong> Please change your password after your first login.
+      Keep your credentials confidential and do not share them with others.
+    </div>
+
+    <div class="steps">
+      <p style="font-size:13px;font-weight:600;color:#1B2B6B;margin-bottom:12px;">How to get started:</p>
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-text">Click the button above or go to <strong>{app_url}</strong></div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-text">Enter your email and password from the box above</div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-text">Choose a competition, set the number of questions, and click <strong>Start Exam</strong></div>
+      </div>
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-text">After submitting, view your results, AI analysis, and topic breakdown</div>
+      </div>
+    </div>
+  </div>
+  <div class="footer">
+    <p>© Math Mission Thailand 2026 · MathComp Platform<br>
+    If you did not expect this email, please ignore it or contact your administrator.</p>
+  </div>
+</div>
+</body>
+</html>
+"""
+
+    plain_body = f"""Welcome to MathComp, {display_name}!
+
+Your account has been created by Math Mission Thailand.
+
+Login details:
+  Email:    {to_email}
+  Password: {password}
+  Role:     {role_label}
+
+Login URL: {app_url}
+
+Steps:
+1. Go to {app_url}
+2. Enter your email and password
+3. Choose a competition and click Start Exam
+4. After the exam, view your AI performance analysis
+
+IMPORTANT: Please change your password after first login.
+
+© Math Mission Thailand 2026 · MathComp Platform
+"""
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"Welcome to MathComp — Your Login Details"
+    msg["From"]    = f"MathComp · Math Mission Thailand <{sender}>"
+    msg["To"]      = to_email
+    msg.attach(MIMEText(plain_body, "plain"))
+    msg.attach(MIMEText(html_body,  "html"))
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
+            server.login(sender, app_password)
+            server.sendmail(sender, to_email, msg.as_string())
+        return True, f"Email sent to {to_email}"
+    except smtplib.SMTPAuthenticationError:
+        return False, "Gmail authentication failed — check GMAIL_SENDER and GMAIL_APP_PASSWORD"
+    except smtplib.SMTPRecipientsRefused:
+        return False, f"Email address rejected: {to_email}"
+    except Exception as e:
+        return False, f"Email error: {e}"
+
+
 def upload_img(file, path: str) -> str:
     try:
         project_id = json.loads(st.secrets.get("FIREBASE_SERVICE_ACCOUNT","{}")).get("project_id","")
@@ -730,7 +907,7 @@ Keep the tone warm, professional, and motivating. Use specific mathematical term
                 "anthropic-version": "2023-06-01",
             },
             json={
-                "model": "claude-sonnet-4-20250514",
+                "model": "claude-sonnet-4-5",
                 "max_tokens": 1000,
                 "messages": [{"role": "user", "content": prompt}],
             },
@@ -1290,7 +1467,7 @@ def page_admin():
                         mime = "image/jpeg" if ext in ("jpg","jpeg") else f"image/{ext}"
                         resp = requests.post("https://api.anthropic.com/v1/messages",
                             headers={"Content-Type":"application/json","x-api-key":st.secrets.get("ANTHROPIC_API_KEY",""),"anthropic-version":"2023-06-01"},
-                            json={"model":"claude-sonnet-4-20250514","max_tokens":1000,
+                            json={"model":"claude-sonnet-4-5","max_tokens":1000,
                                   "messages":[{"role":"user","content":[
                                       {"type":"image","source":{"type":"base64","media_type":mime,"data":img_b64}},
                                       {"type":"text","text":"Extract the math question from this image. Rewrite it using LaTeX ($...$ for inline, $$...$$ for display). Output ONLY the question text."}
@@ -1334,7 +1511,7 @@ def page_admin():
                         pdf_b64 = base64.b64encode(pdf_file.read()).decode()
                         resp = requests.post("https://api.anthropic.com/v1/messages",
                             headers={"Content-Type":"application/json","x-api-key":st.secrets.get("ANTHROPIC_API_KEY",""),"anthropic-version":"2023-06-01"},
-                            json={"model":"claude-sonnet-4-20250514","max_tokens":4000,
+                            json={"model":"claude-sonnet-4-5","max_tokens":4000,
                                   "messages":[{"role":"user","content":[
                                       {"type":"document","source":{"type":"base64","media_type":"application/pdf","data":pdf_b64}},
                                       {"type":"text","text":"Extract ALL math questions from this PDF. Return a JSON array with objects: question_text (LaTeX), topic (Algebra/Number Theory/Geometry/Combinatorics/Word Problem/Other), choices (array or []), correct_answer. Output ONLY valid JSON array."}
@@ -1429,14 +1606,33 @@ def page_admin():
                 c3,c4 = st.columns(2)
                 np = c3.text_input("Password",type="password"); nr = c4.selectbox("Role",["student","admin"])
                 sub_add = st.form_submit_button("Create account",type="primary",use_container_width=True)
+            # Email settings for Add Member
+            with st.expander("⚙️  Email notification settings"):
+                send_email_toggle = st.toggle("Send welcome email to new member", value=True, key="add_send_email")
+                app_url_add = st.text_input("App URL (for login link in email)",
+                    value=st.secrets.get("APP_URL","https://share.streamlit.io"),
+                    key="add_app_url")
+
             if sub_add:
                 if not nm or not ne or not np: st.error("All fields required.")
                 else:
                     try:
                         from firebase_admin import auth as fb_auth
-                        user = fb_auth.create_user(email=ne,password=np,display_name=nm)
-                        db.collection("users").document(user.uid).set({"display_name":nm,"email":ne,"role":nr,"created_at":datetime.now(timezone.utc)})
-                        st.success(f"✅  Account created for **{nm}** as **{nr}**")
+                        user = fb_auth.create_user(email=ne, password=np, display_name=nm)
+                        db.collection("users").document(user.uid).set({
+                            "display_name":nm,"email":ne,"role":nr,
+                            "created_at":datetime.now(timezone.utc)
+                        })
+                        st.success(f"✅  Account created for **{nm}** ({ne}) as **{nr}**")
+
+                        # Send welcome email
+                        if send_email_toggle:
+                            with st.spinner(f"Sending welcome email to {ne}…"):
+                                ok, msg = send_welcome_email(ne, nm, np, nr, app_url_add)
+                            if ok:
+                                st.success(f"📧  Welcome email sent to **{ne}**")
+                            else:
+                                st.warning(f"⚠️  Account created but email failed: {msg}")
                     except Exception as e: st.error(f"Error: {e}")
 
         with mem_csv:
@@ -1464,6 +1660,14 @@ Admin2,admin2@example.com,AdminPass!,admin
                     st.markdown(f"`{r.get('display_name','?')}` · `{r.get('email','?')}` · role: `{r.get('role','student')}`")
                 if len(rows) > 5: st.caption(f"… and {len(rows)-5} more")
                 st.divider()
+                with st.expander("⚙️  Email notification settings"):
+                    bulk_send_email = st.toggle("Send welcome email to each member", value=True, key="bulk_send_email")
+                    bulk_app_url    = st.text_input("App URL (for login link in email)",
+                        value=st.secrets.get("APP_URL","https://share.streamlit.io"),
+                        key="bulk_app_url")
+                    if bulk_send_email:
+                        st.info("📧  Each member will receive a welcome email with their login credentials.")
+
                 if st.button(f"🚀  Create {len(rows)} accounts", type="primary", key="bulk_create"):
                     from firebase_admin import auth as _fb_auth
                     success, failed = 0, []
@@ -1482,6 +1686,9 @@ Admin2,admin2@example.com,AdminPass!,admin
                                 "role": role, "created_at": datetime.now(timezone.utc)
                             })
                             success += 1
+                            # Send welcome email per account
+                            if bulk_send_email:
+                                send_welcome_email(email, name, pwd, role, bulk_app_url)
                         except Exception as e:
                             failed.append(f"{email} — {e}")
                         prog.progress((i+1)/len(rows), text=f"Creating accounts… {i+1}/{len(rows)}")
