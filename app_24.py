@@ -2967,21 +2967,23 @@ Admin2,admin2@example.com,AdminPass!,admin
                     if st.session_state.get("rt_lb_show"):
                         try:
                             # Get all submissions for this competition
+                            # Note: no order_by to avoid needing a composite Firestore index
                             submissions = {}
                             for u in db.collection("users").stream():
                                 uid  = u.id
                                 prof = u.to_dict()
                                 if prof.get("role") == "admin": continue
-                                ss = list(
+                                ss_all = list(
                                     db.collection("users").document(uid)
                                     .collection("exam_sessions")
                                     .where("competition","==",sel_name)
-                                    .order_by("raw_score",
-                                              direction=firestore.Query.DESCENDING)
-                                    .limit(1).stream()
+                                    .stream()
                                 )
-                                if ss:
-                                    s = ss[0].to_dict()
+                                if ss_all:
+                                    # Pick best score — sort in Python, no index needed
+                                    best = max(ss_all,
+                                               key=lambda d: d.to_dict().get("raw_score",0))
+                                    s  = best.to_dict()
                                     ts = s.get("timestamp_start")
                                     submissions[uid] = {
                                         "name":  prof.get("display_name","—"),
