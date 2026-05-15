@@ -647,6 +647,104 @@ def sw(tbd):
     return f"{best} ({sc[best]}%) — consistent accuracy", f"{worst} ({sc[worst]}%) — review recommended"
 
 # ══════════════════════════════════════════════
+# AI Performance Analysis
+# ══════════════════════════════════════════════
+def ai_analyze_performance(
+    name: str,
+    competition: str,
+    level: str,
+    result: dict,
+    questions: list,
+    duration: int,
+) -> str:
+    """
+    Call Claude API to generate a personalized performance analysis.
+    Returns the full analysis as a markdown string.
+    """
+    api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return "_AI analysis unavailable — ANTHROPIC_API_KEY not set in secrets._"
+
+    # Build topic summary
+    tbd   = result["topic_breakdown"]
+    topic_lines = []
+    for topic, v in tbd.items():
+        pct = round(v["correct"] / v["total"] * 100) if v["total"] > 0 else 0
+        topic_lines.append(f"  - {topic}: {v['correct']}/{v['total']} correct ({pct}%)")
+    topic_summary = "\n".join(topic_lines)
+
+    # Build per-question detail (wrong answers only, to keep prompt short)
+    wrong_qs = []
+    for i, (q, pq) in enumerate(zip(questions, result["per_question"]), 1):
+        if not pq["correct"] and pq["chosen"] is not None:
+            wrong_qs.append(
+                f"  Q{i} [{q.get('topic','?')}]: chose {pq['chosen']}, correct {pq['right_answer']}"
+                + (f' — "{q.get("question_text","")[:80]}..."' if q.get("question_text") else "")
+            )
+    wrong_summary = "\n".join(wrong_qs[:15]) if wrong_qs else "  None — all attempted questions were correct."
+
+    blank_c  = sum(1 for pq in result["per_question"] if pq["chosen"] is None)
+    correct_c = sum(1 for pq in result["per_question"] if pq["correct"])
+    wrong_c   = sum(1 for pq in result["per_question"] if not pq["correct"] and pq["chosen"] is not None)
+
+    prompt = f"""You are an expert mathematics coach specializing in competition mathematics.
+Analyze the following student exam result and provide a detailed, personalized, encouraging report.
+
+Student name: {name}
+Competition: {competition} — {level}
+Score: {result['raw_score']} / {result['max_score']} ({result['pct']}%)
+Time taken: {duration//60} min {duration%60} sec
+Questions: {len(questions)} total — {correct_c} correct, {wrong_c} wrong, {blank_c} blank
+
+Topic breakdown:
+{topic_summary}
+
+Wrong answers (first 15):
+{wrong_summary}
+
+Write a structured analysis in markdown with these sections:
+
+## 🏆 Overall Performance
+A 2-3 sentence summary of how the student did, mentioning their score and time.
+
+## 💪 Strengths
+2-3 specific strengths based on topics they did well in. Be specific and encouraging.
+
+## 📈 Areas for Improvement
+2-3 specific topics or skills to work on. For each one, give a concrete study tip or type of problem to practice.
+
+## 🎯 Recommended Next Steps
+3 actionable steps the student should take before their next exam. Be specific (e.g., "Practice 10 AMC 8 geometry problems focusing on circle theorems").
+
+## ⭐ Encouragement
+1 short paragraph of genuine encouragement tailored to their result.
+
+Keep the tone warm, professional, and motivating. Use specific mathematical terms relevant to the topics. Total length: 300-400 words."""
+
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            },
+            json={
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 1000,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=30,
+        )
+        if resp.ok:
+            return resp.json()["content"][0]["text"]
+        else:
+            return f"_AI analysis failed (status {resp.status_code}). Please try again._"
+    except Exception as e:
+        return f"_AI analysis error: {e}_"
+
+
+# ══════════════════════════════════════════════
 # Page: Login
 # ══════════════════════════════════════════════
 def page_login():
@@ -952,6 +1050,57 @@ def page_result():
         """, unsafe_allow_html=True)
 
     st.divider()
+
+    # ── AI Performance Analysis ──────────────
+    st.markdown("""
+    <div style="background:linear-gradient(135deg,#EEF3FF,#FDF2F8);
+                border:1.5px solid #C8D8FF;border-radius:16px;padding:20px 24px;margin-bottom:4px;">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;">
+        <span style="font-size:24px;">🤖</span>
+        <div>
+          <div style="font-size:15px;font-weight:600;color:#1B2B6B;">AI Performance Analysis</div>
+          <div style="font-size:12px;color:#8898CC;">Powered by Claude · Personalized coaching report</div>
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Run analysis automatically or on button press
+    if "ai_analysis" not in st.session_state:
+        st.session_state["ai_analysis"] = None
+        st.session_state["ai_analysis_loading"] = False
+
+    if st.session_state.get("ai_analysis"):
+        # Show cached analysis
+        st.markdown(
+            f'<div style="background:#fff;border:1.5px solid #E8ECF8;border-radius:12px;'
+            f'padding:24px 28px;line-height:1.8;">{st.session_state["ai_analysis"]}</div>',
+            unsafe_allow_html=True
+        )
+        if st.button("🔄  Regenerate analysis", key="regen_ai"):
+            st.session_state["ai_analysis"] = None
+            st.rerun()
+    else:
+        col_ai1, col_ai2 = st.columns([3, 1])
+        col_ai1.markdown(
+            "<p style='color:#5060A0;font-size:14px;margin:8px 0;'>"
+            "Get a personalized coaching report — strengths, weaknesses, and study recommendations.</p>",
+            unsafe_allow_html=True
+        )
+        if col_ai2.button("✨  Analyse my results", type="primary", key="run_ai", use_container_width=True):
+            with st.spinner("Claude is analysing your performance…"):
+                analysis = ai_analyze_performance(
+                    name        = st.session_state.get("display_name", "Student"),
+                    competition = competition,
+                    level       = level,
+                    result      = result,
+                    questions   = qs,
+                    duration    = duration,
+                )
+                st.session_state["ai_analysis"] = analysis
+            st.rerun()
+
+    st.divider()
     st.subheader("Question review")
     st.caption(f"✅ {correct_c} correct  ❌ {wrong_c} wrong  ⬜ {blank_c} blank")
 
@@ -971,7 +1120,8 @@ def page_result():
     st.markdown("</div>", unsafe_allow_html=True)
     st.divider()
     _CLR = ("questions","answers","flagged","current_idx","start_time","time_limit",
-            "result","session_id","duration","confirm_submit","exam_settings")
+            "result","session_id","duration","confirm_submit","exam_settings",
+            "ai_analysis","ai_analysis_loading")
     b1,b2 = st.columns(2)
     if b1.button("← Back to dashboard", use_container_width=True):
         for k in _CLR: st.session_state.pop(k,None)
@@ -1139,7 +1289,7 @@ def page_admin():
                         ext  = q_img.name.split(".")[-1].lower()
                         mime = "image/jpeg" if ext in ("jpg","jpeg") else f"image/{ext}"
                         resp = requests.post("https://api.anthropic.com/v1/messages",
-                            headers={"Content-Type":"application/json"},
+                            headers={"Content-Type":"application/json","x-api-key":st.secrets.get("ANTHROPIC_API_KEY",""),"anthropic-version":"2023-06-01"},
                             json={"model":"claude-sonnet-4-20250514","max_tokens":1000,
                                   "messages":[{"role":"user","content":[
                                       {"type":"image","source":{"type":"base64","media_type":mime,"data":img_b64}},
@@ -1183,7 +1333,7 @@ def page_admin():
                     try:
                         pdf_b64 = base64.b64encode(pdf_file.read()).decode()
                         resp = requests.post("https://api.anthropic.com/v1/messages",
-                            headers={"Content-Type":"application/json"},
+                            headers={"Content-Type":"application/json","x-api-key":st.secrets.get("ANTHROPIC_API_KEY",""),"anthropic-version":"2023-06-01"},
                             json={"model":"claude-sonnet-4-20250514","max_tokens":4000,
                                   "messages":[{"role":"user","content":[
                                       {"type":"document","source":{"type":"base64","media_type":"application/pdf","data":pdf_b64}},
