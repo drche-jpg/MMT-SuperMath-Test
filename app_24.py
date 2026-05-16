@@ -648,12 +648,7 @@ def get_profile(uid: str) -> dict:
 
 def require_auth():
     if "uid" not in st.session_state:
-        # Preserve comp param so student returns to competition after login
-        comp = st.query_params.get("comp","")
-        if comp:
-            st.session_state["pending_comp"] = comp
-        st.session_state["page"] = "login"
-        st.rerun()
+        st.session_state["page"] = "login"; st.rerun()
 
 def require_admin():
     if st.session_state.get("role") != "admin":
@@ -1182,34 +1177,7 @@ def page_dashboard():
 # ══════════════════════════════════════════════
 # Page: Exam
 # ══════════════════════════════════════════════
-def _go(idx):
-    st.session_state["current_idx"] = idx
-    # Write progress if in realtime competition
-    if st.session_state.get("from_realtime"):
-        qs = st.session_state.get("questions",[])
-        answers = st.session_state.get("answers",{})
-        answered = sum(1 for q in qs if answers.get(q["id"]) is not None)
-        _write_progress(
-            st.session_state.get("uid",""),
-            st.session_state.get("competition",""),
-            idx, answered, len(qs)
-        )
-
-def _write_progress(uid:str, comp:str, current_idx:int, answered:int, total:int):
-    """Write student exam progress to Firestore for live monitoring."""
-    try:
-        rt_doc_id = comp.replace(" ","_").replace("/","_")
-        db.collection("realtime_sessions").document(rt_doc_id)          .collection("progress").document(uid).set({
-            "uid":          uid,
-            "display_name": st.session_state.get("display_name","—"),
-            "current_q":    current_idx + 1,
-            "answered":     answered,
-            "total":        total,
-            "pct_done":     round(answered/total*100) if total>0 else 0,
-            "updated_at":   datetime.now(timezone.utc),
-            "status":       "in_progress",
-        }, merge=True)
-    except: pass
+def _go(idx): st.session_state["current_idx"] = idx
 
 def _submit():
     uid=st.session_state["uid"]; qs=st.session_state["questions"]; answers=st.session_state["answers"]
@@ -1217,20 +1185,6 @@ def _submit():
     result=compute_score(st.session_state["competition"],qs,answers)
     sid=save_session(uid,st.session_state["competition"],st.session_state["level"],
                      st.session_state["difficulty"],qs,answers,result,duration)
-    # Mark as submitted in progress tracker
-    try:
-        comp = st.session_state.get("competition","")
-        if st.session_state.get("from_realtime") and comp:
-            rt_doc_id = comp.replace(" ","_").replace("/","_")
-            db.collection("realtime_sessions").document(rt_doc_id)              .collection("progress").document(uid).set({
-                "status":    "submitted",
-                "pct_done":  100,
-                "answered":  len(qs),
-                "total":     len(qs),
-                "current_q": len(qs),
-                "updated_at":datetime.now(timezone.utc),
-            }, merge=True)
-    except: pass
     st.session_state.update({"page":"result","result":result,"session_id":sid,"duration":duration})
     st.rerun()
 
@@ -3005,7 +2959,7 @@ Admin2,admin2@example.com,AdminPass!,admin
                 # ── rt3: Live monitor ────────────────
                 with rt3:
                     st.markdown("#### 🏆 Live Monitor")
-                    st.caption("Shows submitted results AND live progress of students currently in the exam.")
+                    st.caption("Shows all roster students — submitted and waiting.")
 
                     if st.button("🔄  Refresh", key="rt_refresh", type="primary"):
                         st.session_state["rt_lb_show"] = True
@@ -3069,62 +3023,11 @@ Admin2,admin2@example.com,AdminPass!,admin
                                 )
                                 waiting_list = []
 
-                            # Load live progress from Firestore sub-collection
-                            try:
-                                prog_docs = list(
-                                    db.collection("realtime_sessions")
-                                    .document(rt_doc_id)
-                                    .collection("progress")
-                                    .stream()
-                                )
-                                progress_map = {d.id: d.to_dict() for d in prog_docs}
-                            except:
-                                progress_map = {}
-
-                            in_progress = {
-                                uid: p for uid, p in progress_map.items()
-                                if p.get("status") == "in_progress"
-                            }
-
                             # Summary
-                            sc1,sc2,sc3,sc4 = st.columns(4)
-                            sc1.metric("Submitted",   len(submitted_list))
-                            sc2.metric("In progress", len(in_progress))
-                            sc3.metric("Waiting",     len(waiting_list))
-                            sc4.metric("Total",       len(submitted_list)+len(in_progress)+len(waiting_list))
-
-                            # Live progress table
-                            if in_progress:
-                                st.divider()
-                                st.markdown("#### 📝 Currently in exam")
-                                ph1,ph2,ph3,ph4,ph5 = st.columns([3,2,2,2,3])
-                                for col,lbl in zip([ph1,ph2,ph3,ph4,ph5],
-                                    ["Name","Current Q","Answered","Progress",""]):
-                                    col.markdown(f"**{lbl}**")
-                                st.markdown("<hr style='margin:4px 0;border-color:#E8ECF8;'>",
-                                            unsafe_allow_html=True)
-                                for p_uid, p in sorted(
-                                    in_progress.items(),
-                                    key=lambda x: x[1].get("pct_done",0), reverse=True
-                                ):
-                                    pname   = p.get("display_name","—")
-                                    cur_q   = p.get("current_q",0)
-                                    ans     = p.get("answered",0)
-                                    total_q = p.get("total",0)
-                                    pct     = p.get("pct_done",0)
-                                    updated = p.get("updated_at")
-                                    ago     = ""
-                                    if updated:
-                                        secs = int((datetime.now(timezone.utc)-updated).total_seconds())
-                                        ago  = f"{secs}s ago"
-
-                                    pr1,pr2,pr3,pr4,pr5 = st.columns([3,2,2,2,3])
-                                    pr1.markdown(f"**{pname}**")
-                                    pr2.markdown(f"Q{cur_q} / {total_q}")
-                                    pr3.markdown(f"{ans} answered")
-                                    pr4.progress(pct/100 if pct<=100 else 1.0,
-                                                 text=f"{pct}%")
-                                    pr5.caption(ago)
+                            sc1,sc2,sc3 = st.columns(3)
+                            sc1.metric("Submitted",  len(submitted_list))
+                            sc2.metric("Waiting",    len(waiting_list))
+                            sc3.metric("Total",      len(submitted_list)+len(waiting_list))
 
                             # Submitted table
                             if submitted_list:
@@ -3370,39 +3273,10 @@ def page_history():
                     dur = s.get("duration_sec",0)
                     st.markdown(f"**Duration:** {dur//60}m {dur%60}s")
                     st.markdown(f"**Questions:** {s.get('total_questions','—')}")
-                    answers_map = s.get("answers",{})
-                    correct = sum(1 for a in answers_map.values() if a.get("is_correct"))
-                    wrong   = sum(1 for a in answers_map.values() if not a.get("is_correct") and a.get("chosen"))
-                    blank   = sum(1 for a in answers_map.values() if not a.get("chosen"))
+                    correct = sum(1 for a in s.get("answers",{}).values() if a.get("is_correct"))
+                    wrong   = sum(1 for a in s.get("answers",{}).values() if not a.get("is_correct") and a.get("chosen"))
+                    blank   = sum(1 for a in s.get("answers",{}).values() if not a.get("chosen"))
                     st.markdown(f"✅ {correct} correct &nbsp; ❌ {wrong} wrong &nbsp; ⬜ {blank} blank")
-
-                # ── Per-question answer log ───────────────────────
-                if answers_map:
-                    st.divider()
-                    st.markdown("**Answer log**")
-                    # Table header
-                    h1,h2,h3,h4,h5,h6 = st.columns([1,4,2,2,2,2])
-                    for col,lbl in zip([h1,h2,h3,h4,h5,h6],
-                                       ["Q","Topic","Your answer","Correct","Result","Time"]):
-                        col.markdown(f"<span style='font-size:11px;color:#8898CC;text-transform:uppercase;"
-                                     f"letter-spacing:.06em;font-family:monospace;'>{lbl}</span>",
-                                     unsafe_allow_html=True)
-                    st.markdown("<hr style='margin:4px 0;border-color:#E8ECF8;'>", unsafe_allow_html=True)
-                    for i, (qid, ans) in enumerate(sorted(answers_map.items()), 1):
-                        ok     = ans.get("is_correct", False)
-                        chosen = ans.get("chosen") or "—"
-                        right  = ans.get("correct") or "—"
-                        topic  = ans.get("topic","—")
-                        tsec   = ans.get("time_sec", 0)
-                        icon   = "✅" if ok else ("⬜" if not ans.get("chosen") else "❌")
-                        r1,r2,r3,r4,r5,r6 = st.columns([1,4,2,2,2,2])
-                        r1.markdown(f"**{i}**")
-                        r2.markdown(f"<span style='font-size:13px;'>{topic}</span>",
-                                    unsafe_allow_html=True)
-                        r3.markdown(f"`{chosen}`")
-                        r4.markdown(f"`{right}`")
-                        r5.markdown(icon)
-                        r6.markdown(f"{tsec}s" if tsec else "—")
 
     st.markdown("</div>", unsafe_allow_html=True)
     footer()
@@ -3686,90 +3560,51 @@ def page_realtime():
 
     # ── NOT STARTED / WAITING ─────────────────
     if status != "open":
-        # RELIABLE APPROACH: Use a Streamlit checkbox that JS toggles.
-        # Toggling a checkbox value triggers a widget state change
-        # which causes st.rerun() WITHOUT any page reload.
-        # Session state (uid, rt_comp, page) is fully preserved.
-
-        cb_key = f"rt_cb_{rt_doc_id}"
-        cb_val = st.session_state.get(cb_key, False)
-
-        # Render the checkbox (will be hidden by CSS)
-        new_cb = st.checkbox("poll_trigger", value=cb_val, key=cb_key)
-        if new_cb != cb_val:
-            # Checkbox was toggled by JS — rerun to re-read Firestore status
-            st.rerun()
-
-        # JS: toggle the checkbox every 6 seconds
-        components.html("""
-<script>
-(function() {
-  function toggleCheckbox() {
-    try {
-      var cbs = window.parent.document.querySelectorAll('input[type="checkbox"]');
-      for (var i = 0; i < cbs.length; i++) {
-        var label = cbs[i].closest('label');
-        if (label && label.innerText.trim() === 'poll_trigger') {
-          cbs[i].click();
-          return;
-        }
-      }
-    } catch(e) {}
-  }
-  // Start polling after 6 seconds, repeat every 6 seconds
-  setTimeout(function poll() {
-    toggleCheckbox();
-    setTimeout(poll, 6000);
-  }, 6000);
-})();
-</script>""", height=0, scrolling=False)
-
-        # Hide the poll checkbox completely
-        st.markdown("""
-<style>
-div[data-testid="stCheckbox"]:has(label p) { display: none !important; }
-</style>""", unsafe_allow_html=True)
+        # Auto-refresh every 10 seconds while waiting
+        import streamlit.components.v1 as _comp
+        _comp.html(
+            "<script>setTimeout(function(){window.parent.location.reload();},10000);</script>",
+            height=0
+        )
+        opened_str = ""
+        if rt_data.get("opened_at"):
+            opened_str = rt_data["opened_at"].strftime("%d %b %Y %H:%M")
 
         st.markdown(f"""
         <div class="mc-hero">
-          <div class="mc-hero-eyebrow">Realtime Competition · Waiting Room</div>
+          <div class="mc-hero-eyebrow">Realtime Competition</div>
           <div class="mc-hero-title"><em>{comp_name}</em></div>
         </div>
-        <div class="mc-body" style="text-align:center;padding:48px 28px;">
-          <div style="font-size:64px;margin-bottom:16px;
-                      animation:pulse_wait 2s ease-in-out infinite;">⏳</div>
-          <div style="font-family:'Fraunces',serif;font-size:26px;font-weight:300;
-                      color:#1B2B6B;margin-bottom:10px;">Waiting for competition to start…</div>
-          <div style="font-size:15px;color:#5060A0;margin-bottom:8px;">
-            Welcome, <strong>{name}</strong>
+        <div class="mc-body" style="text-align:center;padding:60px 28px;">
+          <div style="font-size:64px;margin-bottom:16px;animation:pulse 2s ease-in-out infinite;">⏳</div>
+          <div style="font-family:'Fraunces',serif;font-size:28px;font-weight:300;
+                      color:#1B2B6B;margin-bottom:12px;">Waiting for competition to start…</div>
+          <div style="font-size:15px;color:#8898CC;margin-bottom:8px;">
+            Welcome, <strong>{name}</strong>! You are registered for:
           </div>
-          <div style="font-size:20px;font-weight:700;color:#1B2B6B;margin-bottom:24px;">
+          <div style="font-size:20px;font-weight:600;color:#1B2B6B;margin-bottom:24px;">
             {comp_name}
           </div>
           <div style="background:#EEF3FF;border:1.5px solid #C8D8FF;border-radius:12px;
-                      padding:14px 24px;display:inline-block;margin-bottom:20px;">
-            <div style="font-size:12px;color:#8898CC;margin-bottom:4px;letter-spacing:.08em;
-                        text-transform:uppercase;font-family:monospace;">Status</div>
-            <div style="font-size:17px;font-weight:600;color:#F5A623;">
+                      padding:16px 24px;display:inline-block;margin-bottom:24px;">
+            <div style="font-size:13px;color:#8898CC;margin-bottom:4px;">Status</div>
+            <div style="font-size:18px;font-weight:600;color:#4A7CF7;">
               🟡 Waiting for admin to open the exam
             </div>
           </div>
-          <div style="font-size:13px;color:#8898CC;margin-top:8px;line-height:1.8;">
-            ✅ You are logged in as <strong>{name}</strong><br>
-            🔄 Auto-checks every 6 seconds — no re-login needed<br>
-            ▶️ Exam will appear on this screen the moment admin opens it
+          <div style="font-size:13px;color:#8898CC;">
+            This page refreshes automatically every 10 seconds.<br>
+            The exam will start as soon as your administrator opens it.
           </div>
         </div>
         <style>
-        @keyframes pulse_wait {{0%,100%{{opacity:1}}50%{{opacity:.4}}}}
+        @keyframes pulse {{0%,100%{{opacity:1}}50%{{opacity:.5}}}}
         </style>""", unsafe_allow_html=True)
 
-        _, mid, _ = st.columns([2,1,2])
-        if mid.button("🔄  Check now", use_container_width=True, type="primary"):
+        col1,col2,col3 = st.columns([1,1,1])
+        if col2.button("🔄  Check now", use_container_width=True, type="primary"):
             st.rerun()
-
-        footer()
-        return
+        footer(); return
 
     # ── OPEN — show exam setup ─────────────────
     st.markdown(f"""
@@ -3817,38 +3652,25 @@ div[data-testid="stCheckbox"]:has(label p) { display: none !important; }
             f'Correct +{rules["correct"]} · Wrong {rules["wrong"]} · Blank {rules["blank"]}</div>',
             unsafe_allow_html=True)
 
-    # Show AI-resistant settings for this competition
-    settings = load_settings(comp_name)
-    ai_layers = [k for k in ["anti_copy_text","noise_canvas","block_ctrl_c",
-                              "block_text_selection","block_paste_answer","block_drag",
-                              "block_right_click","tab_switch_warning","block_printscreen",
-                              "clipboard_api_override","devtools_detection","screen_capture_block"]
-                 if settings.get(k)]
-    if ai_layers:
-        st.markdown(
-            f'<div style="background:#FDF2F8;border:1px solid #FBCFE8;border-radius:8px;'
-            f'padding:10px 14px;font-size:12px;color:#9D174D;margin-bottom:12px;">'
-            f'🛡️ <strong>AI-resistant mode active</strong> · {len(ai_layers)}/12 layers enabled</div>',
-            unsafe_allow_html=True)
-
     if st.button("🚀  Start Competition Exam", type="primary", use_container_width=True):
         with st.spinner("Loading questions…"):
             qs = fetch_questions(comp_name, level, difficulty, n_questions)
         if not qs:
             st.error("No questions found for this selection. Please try a different difficulty or level.")
         else:
+            settings = load_settings(comp_name)
             st.session_state.update({
-                "page":          "exam",
-                "competition":   comp_name,
-                "level":         level,
-                "difficulty":    difficulty,
-                "questions":     qs,
-                "answers":       {},
-                "flagged":       set(),
-                "current_idx":   0,
-                "start_time":    time.time(),
-                "time_limit":    suggested,
-                "exam_settings": settings,   # ← includes all AI-resistant settings
+                "page":        "exam",
+                "competition": comp_name,
+                "level":       level,
+                "difficulty":  difficulty,
+                "questions":   qs,
+                "answers":     {},
+                "flagged":     set(),
+                "current_idx": 0,
+                "start_time":  time.time(),
+                "time_limit":  suggested,
+                "exam_settings": settings,
                 "from_realtime": True,
             })
             st.rerun()
@@ -3858,127 +3680,9 @@ div[data-testid="stCheckbox"]:has(label p) { display: none !important; }
 
 
 # ══════════════════════════════════════════════
-# Page: Admin View Student History
+# Sidebar
 # ══════════════════════════════════════════════
-def page_admin_student_history():
-    require_auth(); require_admin(); inject_css()
-    uid   = st.session_state.get("admin_view_uid","")
-    name  = st.session_state.get("admin_view_name","Student")
-    topbar(f"History — {name}")
-
-    if not uid:
-        st.error("No student selected."); return
-
-    try:
-        sessions = [s.to_dict() for s in
-                    db.collection("users").document(uid)
-                    .collection("exam_sessions")
-                    .order_by("timestamp_start",
-                              direction=firestore.Query.DESCENDING)
-                    .limit(100).stream()]
-    except Exception as e:
-        st.error(f"Error: {e}"); sessions = []
-
-    st.markdown(f"""
-    <div class="mc-hero">
-      <div class="mc-hero-eyebrow">Admin view · Student history</div>
-      <div class="mc-hero-title"><em>{name}</em>'s answers</div>
-      <div class="mc-metrics">
-        <div class="mc-metric"><div class="mc-metric-label">Sessions</div>
-          <div class="mc-metric-val">{len(sessions)}</div></div>
-        <div class="mc-metric"><div class="mc-metric-label">Avg Accuracy</div>
-          <div class="mc-metric-val">{round(sum(s.get("pct",0) for s in sessions)/len(sessions),1) if sessions else 0}%</div></div>
-        <div class="mc-metric"><div class="mc-metric-label">Best Score</div>
-          <div class="mc-metric-val">{max((s.get("pct",0) for s in sessions),default=0)}%</div></div>
-        <div class="mc-metric"><div class="mc-metric-label">Competitions</div>
-          <div class="mc-metric-val">{len(set(s.get("competition","") for s in sessions))}</div></div>
-      </div>
-    </div>
-    <div class="mc-body">""", unsafe_allow_html=True)
-
-    if st.button("← Back to Members", use_container_width=False):
-        st.session_state["page"] = "admin"; st.rerun()
-
-    if not sessions:
-        st.info("No sessions recorded yet.")
-        st.markdown("</div>", unsafe_allow_html=True); footer(); return
-
-    # Filter
-    comps = sorted(set(s.get("competition","") for s in sessions))
-    flt   = st.selectbox("Filter by competition", ["All"]+comps, key="adm_hist_filter")
-    show  = [s for s in sessions if flt=="All" or s.get("competition","")==flt]
-
-    for s in show:
-        ts  = s.get("timestamp_start")
-        dt  = ts.strftime("%d %b %Y  %H:%M") if ts else "—"
-        pct = s.get("pct",0)
-        dot = "🟢" if pct>=70 else ("🟡" if pct>=50 else "🔴")
-        answers_map = s.get("answers",{})
-        correct = sum(1 for a in answers_map.values() if a.get("is_correct"))
-        wrong   = sum(1 for a in answers_map.values() if not a.get("is_correct") and a.get("chosen"))
-        blank   = sum(1 for a in answers_map.values() if not a.get("chosen"))
-
-        with st.expander(
-            f"{dot}  {s.get('competition','')} · {s.get('level','')} · "
-            f"{s.get('difficulty','').capitalize()} · "
-            f"**{s.get('raw_score','')} / {s.get('max_score','')}** ({pct}%) · {dt}"
-        ):
-            # Summary row
-            c1,c2,c3 = st.columns(3)
-            dur = s.get("duration_sec",0)
-            c1.markdown(f"**Duration:** {dur//60}m {dur%60}s")
-            c2.markdown(f"**Questions:** {s.get('total_questions','—')}")
-            c3.markdown(f"✅ {correct} &nbsp; ❌ {wrong} &nbsp; ⬜ {blank}")
-
-            # Topic breakdown
-            tbd = s.get("topic_breakdown",{})
-            if tbd:
-                st.markdown("**Topic breakdown**")
-                for topic,v in tbd.items():
-                    tp    = round(v["correct"]/v["total"]*100) if v["total"]>0 else 0
-                    color = "#4A7CF7" if tp>=50 else "#F472B6"
-                    st.markdown(
-                        f'<div class="mc-topic-row">'
-                        f'<span class="mc-topic-name">{topic}</span>'
-                        f'<div class="mc-bar-bg"><div class="mc-bar-fill" '
-                        f'style="width:{tp}%;background:{color};"></div></div>'
-                        f'<span class="mc-bar-pct">{tp}%</span></div>',
-                        unsafe_allow_html=True)
-
-            # Per-question answer log
-            if answers_map:
-                st.divider()
-                st.markdown("**Per-question answer log**")
-                h1,h2,h3,h4,h5,h6 = st.columns([1,4,2,2,2,2])
-                for col,lbl in zip([h1,h2,h3,h4,h5,h6],
-                                   ["Q","Topic","Chosen","Correct","Result","Time(s)"]):
-                    col.markdown(
-                        f"<span style='font-size:11px;color:#8898CC;text-transform:uppercase;"
-                        f"letter-spacing:.06em;font-family:monospace;'>{lbl}</span>",
-                        unsafe_allow_html=True)
-                st.markdown("<hr style='margin:4px 0;border-color:#E8ECF8;'>",
-                            unsafe_allow_html=True)
-                for i,(qid,ans) in enumerate(sorted(answers_map.items()),1):
-                    ok     = ans.get("is_correct",False)
-                    chosen = ans.get("chosen") or "—"
-                    right  = ans.get("correct") or "—"
-                    topic  = ans.get("topic","—")
-                    tsec   = ans.get("time_sec",0)
-                    icon   = "✅" if ok else ("⬜" if not ans.get("chosen") else "❌")
-                    r1,r2,r3,r4,r5,r6 = st.columns([1,4,2,2,2,2])
-                    r1.markdown(f"**{i}**")
-                    r2.markdown(f"<span style='font-size:13px;'>{topic}</span>",
-                                unsafe_allow_html=True)
-                    r3.markdown(f"`{chosen}`")
-                    r4.markdown(f"`{right}`")
-                    r5.markdown(icon)
-                    r6.markdown(f"{tsec}" if tsec else "—")
-
-    st.markdown("</div>", unsafe_allow_html=True)
-    footer()
-
-
-
+def render_sidebar():
     if "uid" not in st.session_state: return
     with st.sidebar:
         st.markdown(f"**{st.session_state.get('display_name','')}**")
@@ -4003,8 +3707,7 @@ def page_admin_student_history():
 # Router
 # ══════════════════════════════════════════════
 def main():
-    if "page" not in st.session_state:
-        st.session_state["page"] = "login"
+    if "page" not in st.session_state: st.session_state["page"]="login"
 
     params = st.query_params
 
@@ -4012,68 +3715,69 @@ def main():
     if "comp" in params:
         comp_param = params.get("comp","").strip()
 
-        if comp_param:
-            if "uid" not in st.session_state:
-                # Not logged in yet — save for after login
-                if st.session_state.get("pending_comp") != comp_param:
-                    st.session_state["pending_comp"]  = comp_param
-                    st.session_state["pending_level"] = params.get("level","")
+        if comp_param and "uid" not in st.session_state:
+            # Not logged in — save pending and go to login
+            st.session_state["pending_comp"]  = comp_param
+            st.session_state["pending_level"] = params.get("level","")
 
-            elif st.session_state.get("rt_comp") != comp_param:
-                # Logged in and this is a NEW competition link
+        elif comp_param and "uid" in st.session_state:
+            # Logged in — check if this is a realtime competition
+            if st.session_state.get("rt_comp") != comp_param:
+                # New competition link — check its realtime status
                 rt_doc_id = comp_param.replace(" ","_").replace("/","_")
                 try:
-                    rt_doc    = db.collection("realtime_sessions").document(rt_doc_id).get()
-                    rt_data   = rt_doc.to_dict() if rt_doc.exists else {}
+                    rt_doc  = db.collection("realtime_sessions").document(rt_doc_id).get()
+                    rt_data = rt_doc.to_dict() if rt_doc.exists else {}
                     rt_status = rt_data.get("status","not started")
                 except:
                     rt_status = "not started"
+
+                # Store and route
                 st.session_state["rt_comp"]   = comp_param
                 st.session_state["rt_status"] = rt_status
-                st.session_state["page"]      = "realtime"
+
+                # Always go to realtime page (waiting room or open exam)
+                st.session_state["page"] = "realtime"
+                # Clear any prefill to avoid conflict
                 st.session_state.pop("pending_comp",  None)
                 st.session_state.pop("pending_level", None)
                 st.rerun()
-            else:
-                # Same competition already loaded — just ensure page stays realtime
-                # (this branch runs on every auto-poll rerun)
-                current_page = st.session_state.get("page","")
-                if current_page not in ("realtime","exam","result"):
-                    st.session_state["page"] = "realtime"
 
     render_sidebar()
     page = st.session_state["page"]
 
-    # ── After login, redirect to pending competition ──
+    # ── After login, handle pending competition link ──
     if "uid" in st.session_state and st.session_state.get("pending_comp"):
-        comp_param  = st.session_state.pop("pending_comp","")
+        comp_param = st.session_state.pop("pending_comp","")
         level_param = st.session_state.pop("pending_level","")
+
         if comp_param:
+            # Check realtime status
             rt_doc_id = comp_param.replace(" ","_").replace("/","_")
             try:
-                rt_doc    = db.collection("realtime_sessions").document(rt_doc_id).get()
-                rt_data   = rt_doc.to_dict() if rt_doc.exists else {}
+                rt_doc  = db.collection("realtime_sessions").document(rt_doc_id).get()
+                rt_data = rt_doc.to_dict() if rt_doc.exists else {}
                 rt_status = rt_data.get("status","not started")
             except:
                 rt_status = "not started"
+
             st.session_state["rt_comp"]   = comp_param
             st.session_state["rt_status"] = rt_status
             st.session_state["page"]      = "realtime"
             st.rerun()
 
-    if   page=="login":                   page_login()
-    elif page=="dashboard":               page_dashboard()
-    elif page=="exam":                    page_exam()
-    elif page=="result":                  page_result()
-    elif page=="admin":                   page_admin()
-    elif page=="history":                 page_history()
-    elif page=="leaderboard":             page_leaderboard()
-    elif page=="admin_analytics":         page_admin_analytics()
-    elif page=="realtime":                page_realtime()
-    elif page=="admin_student_history":   page_admin_student_history()
+    if   page=="login":            page_login()
+    elif page=="dashboard":        page_dashboard()
+    elif page=="exam":             page_exam()
+    elif page=="result":           page_result()
+    elif page=="admin":            page_admin()
+    elif page=="history":          page_history()
+    elif page=="leaderboard":      page_leaderboard()
+    elif page=="admin_analytics":  page_admin_analytics()
+    elif page=="realtime":         page_realtime()
     else:
         st.error(f"Unknown page: {page}")
-        st.session_state["page"] = "login"; st.rerun()
+        st.session_state["page"]="login"; st.rerun()
 
 if __name__=="__main__":
     main()
