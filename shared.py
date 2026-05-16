@@ -950,6 +950,78 @@ def sw(tbd):
 # ══════════════════════════════════════════════
 # AI Performance Analysis
 # ══════════════════════════════════════════════
+
+def generate_pdf_report(name:str, sessions:list) -> bytes:
+    """Generate a simple HTML→PDF-style report as HTML bytes for download."""
+    rows = ""
+    for s in sessions:
+        ts  = s.get("timestamp_start")
+        dt  = ts.strftime("%d %b %Y") if ts else "—"
+        tbd = s.get("topic_breakdown",{})
+        topic_str = " · ".join(
+            f"{t}: {round(v['correct']/v['total']*100)}%"
+            for t,v in tbd.items() if v.get("total",0)>0
+        )
+        color = "#22C55E" if s.get("pct",0)>=70 else ("#EAB308" if s.get("pct",0)>=50 else "#EF4444")
+        rows += f"""
+        <tr>
+          <td>{dt}</td>
+          <td><strong>{s.get("competition","")}</strong> · {s.get("level","")}</td>
+          <td>{s.get("difficulty","").capitalize()}</td>
+          <td style="text-align:center;font-weight:600;">{s.get("raw_score","")} / {s.get("max_score","")}</td>
+          <td style="text-align:center;font-weight:700;color:{color};">{s.get("pct","")}%</td>
+          <td style="font-size:11px;color:#5060A0;">{topic_str}</td>
+        </tr>"""
+
+    total_sessions = len(sessions)
+    avg_pct = round(sum(s.get("pct",0) for s in sessions)/total_sessions,1) if sessions else 0
+    best    = max(sessions, key=lambda s:s.get("pct",0)) if sessions else {}
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<style>
+  body{{font-family:'Segoe UI',Arial,sans-serif;color:#1B2B6B;margin:0;padding:0;background:#F8F9FF;}}
+  .header{{background:#1B2B6B;color:#fff;padding:32px 48px;}}
+  .header h1{{margin:0;font-size:28px;font-weight:300;font-style:italic;}}
+  .header p{{margin:6px 0 0;font-size:12px;opacity:.55;letter-spacing:.1em;text-transform:uppercase;}}
+  .body{{padding:36px 48px;}}
+  .student{{font-size:22px;font-weight:600;margin-bottom:4px;}}
+  .meta{{font-size:13px;color:#8898CC;margin-bottom:28px;}}
+  .summary{{display:flex;gap:20px;margin-bottom:32px;}}
+  .card{{background:#fff;border:1.5px solid #E8ECF8;border-radius:12px;padding:16px 20px;flex:1;}}
+  .card-label{{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:#8898CC;margin-bottom:4px;}}
+  .card-val{{font-size:26px;font-weight:700;color:#1B2B6B;}}
+  table{{width:100%;border-collapse:collapse;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(27,43,107,.06);}}
+  th{{background:#1B2B6B;color:#fff;padding:12px 16px;font-size:12px;text-align:left;font-weight:500;letter-spacing:.05em;}}
+  td{{padding:11px 16px;font-size:13px;border-bottom:1px solid #F3F5FB;}}
+  tr:last-child td{{border-bottom:none;}}
+  tr:hover td{{background:#F8F9FF;}}
+  .footer{{background:#1B2B6B;color:rgba(255,255,255,.4);padding:16px 48px;font-size:11px;margin-top:0;}}
+</style>
+</head><body>
+<div class="header">
+  <h1>MathComp · Student Report</h1>
+  <p>Math Mission Thailand · Generated {datetime.now().strftime("%d %b %Y %H:%M")}</p>
+</div>
+<div class="body">
+  <div class="student">{name}</div>
+  <div class="meta">Personal Performance Report · All Sessions</div>
+  <div class="summary">
+    <div class="card"><div class="card-label">Total Sessions</div><div class="card-val">{total_sessions}</div></div>
+    <div class="card"><div class="card-label">Average Accuracy</div><div class="card-val">{avg_pct}%</div></div>
+    <div class="card"><div class="card-label">Best Score</div><div class="card-val">{best.get("pct","—")}%</div></div>
+    <div class="card"><div class="card-label">Best Competition</div><div class="card-val" style="font-size:14px;">{best.get("competition","—")}</div></div>
+  </div>
+  <table>
+    <tr><th>Date</th><th>Competition</th><th>Difficulty</th><th style="text-align:center;">Score</th><th style="text-align:center;">Accuracy</th><th>Topic Breakdown</th></tr>
+    {rows if rows else '<tr><td colspan="6" style="text-align:center;padding:24px;color:#8898CC;">No sessions yet</td></tr>'}
+  </table>
+</div>
+<div class="footer">© Math Mission Thailand 2026 · MathComp Platform · Confidential</div>
+</body></html>"""
+    return html.encode("utf-8")
+
+
 def ai_analyze_performance(
     name: str,
     competition: str,
