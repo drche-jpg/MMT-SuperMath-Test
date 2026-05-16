@@ -1177,7 +1177,34 @@ def page_dashboard():
 # ══════════════════════════════════════════════
 # Page: Exam
 # ══════════════════════════════════════════════
-def _go(idx): st.session_state["current_idx"] = idx
+def _go(idx):
+    st.session_state["current_idx"] = idx
+    # Write progress if in realtime competition
+    if st.session_state.get("from_realtime"):
+        qs = st.session_state.get("questions",[])
+        answers = st.session_state.get("answers",{})
+        answered = sum(1 for q in qs if answers.get(q["id"]) is not None)
+        _write_progress(
+            st.session_state.get("uid",""),
+            st.session_state.get("competition",""),
+            idx, answered, len(qs)
+        )
+
+def _write_progress(uid:str, comp:str, current_idx:int, answered:int, total:int):
+    """Write student exam progress to Firestore for live monitoring."""
+    try:
+        rt_doc_id = comp.replace(" ","_").replace("/","_")
+        db.collection("realtime_sessions").document(rt_doc_id)          .collection("progress").document(uid).set({
+            "uid":          uid,
+            "display_name": st.session_state.get("display_name","—"),
+            "current_q":    current_idx + 1,
+            "answered":     answered,
+            "total":        total,
+            "pct_done":     round(answered/total*100) if total>0 else 0,
+            "updated_at":   datetime.now(timezone.utc),
+            "status":       "in_progress",
+        }, merge=True)
+    except: pass
 
 def _submit():
     uid=st.session_state["uid"]; qs=st.session_state["questions"]; answers=st.session_state["answers"]
@@ -1185,6 +1212,20 @@ def _submit():
     result=compute_score(st.session_state["competition"],qs,answers)
     sid=save_session(uid,st.session_state["competition"],st.session_state["level"],
                      st.session_state["difficulty"],qs,answers,result,duration)
+    # Mark as submitted in progress tracker
+    try:
+        comp = st.session_state.get("competition","")
+        if st.session_state.get("from_realtime") and comp:
+            rt_doc_id = comp.replace(" ","_").replace("/","_")
+            db.collection("realtime_sessions").document(rt_doc_id)              .collection("progress").document(uid).set({
+                "status":    "submitted",
+                "pct_done":  100,
+                "answered":  len(qs),
+                "total":     len(qs),
+                "current_q": len(qs),
+                "updated_at":datetime.now(timezone.utc),
+            }, merge=True)
+    except: pass
     st.session_state.update({"page":"result","result":result,"session_id":sid,"duration":duration})
     st.rerun()
 
@@ -2959,7 +3000,7 @@ Admin2,admin2@example.com,AdminPass!,admin
                 # ── rt3: Live monitor ────────────────
                 with rt3:
                     st.markdown("#### 🏆 Live Monitor")
-                    st.caption("Shows all roster students — submitted and waiting.")
+                    st.caption("Shows submitted results AND live progress of students currently in the exam.")
 
                     if st.button("🔄  Refresh", key="rt_refresh", type="primary"):
                         st.session_state["rt_lb_show"] = True
@@ -3023,11 +3064,62 @@ Admin2,admin2@example.com,AdminPass!,admin
                                 )
                                 waiting_list = []
 
+                            # Load live progress from Firestore sub-collection
+                            try:
+                                prog_docs = list(
+                                    db.collection("realtime_sessions")
+                                    .document(rt_doc_id)
+                                    .collection("progress")
+                                    .stream()
+                                )
+                                progress_map = {d.id: d.to_dict() for d in prog_docs}
+                            except:
+                                progress_map = {}
+
+                            in_progress = {
+                                uid: p for uid, p in progress_map.items()
+                                if p.get("status") == "in_progress"
+                            }
+
                             # Summary
-                            sc1,sc2,sc3 = st.columns(3)
-                            sc1.metric("Submitted",  len(submitted_list))
-                            sc2.metric("Waiting",    len(waiting_list))
-                            sc3.metric("Total",      len(submitted_list)+len(waiting_list))
+                            sc1,sc2,sc3,sc4 = st.columns(4)
+                            sc1.metric("Submitted",   len(submitted_list))
+                            sc2.metric("In progress", len(in_progress))
+                            sc3.metric("Waiting",     len(waiting_list))
+                            sc4.metric("Total",       len(submitted_list)+len(in_progress)+len(waiting_list))
+
+                            # Live progress table
+                            if in_progress:
+                                st.divider()
+                                st.markdown("#### 📝 Currently in exam")
+                                ph1,ph2,ph3,ph4,ph5 = st.columns([3,2,2,2,3])
+                                for col,lbl in zip([ph1,ph2,ph3,ph4,ph5],
+                                    ["Name","Current Q","Answered","Progress",""]):
+                                    col.markdown(f"**{lbl}**")
+                                st.markdown("<hr style='margin:4px 0;border-color:#E8ECF8;'>",
+                                            unsafe_allow_html=True)
+                                for p_uid, p in sorted(
+                                    in_progress.items(),
+                                    key=lambda x: x[1].get("pct_done",0), reverse=True
+                                ):
+                                    pname   = p.get("display_name","—")
+                                    cur_q   = p.get("current_q",0)
+                                    ans     = p.get("answered",0)
+                                    total_q = p.get("total",0)
+                                    pct     = p.get("pct_done",0)
+                                    updated = p.get("updated_at")
+                                    ago     = ""
+                                    if updated:
+                                        secs = int((datetime.now(timezone.utc)-updated).total_seconds())
+                                        ago  = f"{secs}s ago"
+
+                                    pr1,pr2,pr3,pr4,pr5 = st.columns([3,2,2,2,3])
+                                    pr1.markdown(f"**{pname}**")
+                                    pr2.markdown(f"Q{cur_q} / {total_q}")
+                                    pr3.markdown(f"{ans} answered")
+                                    pr4.progress(pct/100 if pct<=100 else 1.0,
+                                                 text=f"{pct}%")
+                                    pr5.caption(ago)
 
                             # Submitted table
                             if submitted_list:
@@ -3589,12 +3681,43 @@ def page_realtime():
 
     # ── NOT STARTED / WAITING ─────────────────
     if status != "open":
-        # Use Streamlit's built-in auto-rerun — does NOT reload page or kill session
-        import time as _time
-        # Poll every 5 seconds using session_state counter
-        poll_key = f"rt_poll_{rt_doc_id}"
-        if poll_key not in st.session_state:
-            st.session_state[poll_key] = 0
+        # The correct approach for Streamlit Cloud:
+        # Use st_autorefresh via a JS component that clicks a hidden button
+        # This triggers a real Streamlit rerun without sleeping the thread
+        # or doing a full browser page reload (both of which kill the session)
+
+        poll_key = f"rt_auto_{rt_doc_id}"
+
+        # Hidden auto-check button — JS will click it every 5 seconds
+        auto_check = st.button("auto_check_hidden", key=poll_key)
+        if auto_check:
+            st.rerun()
+
+        # JS: find the hidden button and click it every 5s
+        components.html(f"""
+<script>
+(function() {{
+  var interval = setInterval(function() {{
+    // Find all buttons and click the one labelled auto_check_hidden
+    var btns = window.parent.document.querySelectorAll('button');
+    for (var i=0; i<btns.length; i++) {{
+      if (btns[i].innerText.trim() === 'auto_check_hidden') {{
+        btns[i].click();
+        break;
+      }}
+    }}
+  }}, 6000);  // every 6 seconds
+}})();
+</script>""", height=0, scrolling=False)
+
+        # Hide the auto-check button with CSS
+        st.markdown("""
+<style>
+button[kind="secondary"] {{ }}
+div[data-testid="stButton"] button:has(> div > p:contains("auto_check_hidden")) {{
+  display: none !important;
+}}
+</style>""", unsafe_allow_html=True)
 
         st.markdown(f"""
         <div class="mc-hero">
@@ -3602,41 +3725,42 @@ def page_realtime():
           <div class="mc-hero-title"><em>{comp_name}</em></div>
         </div>
         <div class="mc-body" style="text-align:center;padding:48px 28px;">
-          <div style="font-size:64px;margin-bottom:16px;">⏳</div>
+          <div style="font-size:64px;margin-bottom:16px;
+                      animation:pulse_wait 2s ease-in-out infinite;">⏳</div>
           <div style="font-family:'Fraunces',serif;font-size:26px;font-weight:300;
                       color:#1B2B6B;margin-bottom:10px;">Waiting for competition to start…</div>
           <div style="font-size:15px;color:#5060A0;margin-bottom:8px;">
             Welcome, <strong>{name}</strong>
           </div>
-          <div style="font-size:18px;font-weight:600;color:#1B2B6B;margin-bottom:24px;">
+          <div style="font-size:20px;font-weight:700;color:#1B2B6B;margin-bottom:24px;">
             {comp_name}
           </div>
           <div style="background:#EEF3FF;border:1.5px solid #C8D8FF;border-radius:12px;
                       padding:14px 24px;display:inline-block;margin-bottom:20px;">
             <div style="font-size:12px;color:#8898CC;margin-bottom:4px;letter-spacing:.08em;
                         text-transform:uppercase;font-family:monospace;">Status</div>
-            <div style="font-size:17px;font-weight:600;color:#4A7CF7;">
+            <div style="font-size:17px;font-weight:600;color:#F5A623;">
               🟡 Waiting for admin to open the exam
             </div>
           </div>
-          <div style="font-size:13px;color:#8898CC;margin-top:8px;">
-            This page checks automatically every 5 seconds.<br>
-            The exam will open on this screen without any page reload or re-login.
+          <div style="font-size:13px;color:#8898CC;margin-top:8px;line-height:1.7;">
+            ✅ You are logged in and registered.<br>
+            🔄 This page checks every 6 seconds automatically.<br>
+            ▶️ When admin opens the exam, it will appear here instantly<br>
+            &nbsp;&nbsp;&nbsp;&nbsp;without any re-login required.
           </div>
-        </div>""", unsafe_allow_html=True)
+        </div>
+        <style>
+        @keyframes pulse_wait {{0%,100%{{opacity:1}}50%{{opacity:.4}}}}
+        </style>""", unsafe_allow_html=True)
 
-        col1,col2,col3 = st.columns([1,1,1])
-        if col2.button("🔄  Check now", use_container_width=True, type="primary"):
-            st.session_state[poll_key] += 1
+        # Manual check button (visible, centered)
+        _, mid, _ = st.columns([2,1,2])
+        if mid.button("🔄  Check now", use_container_width=True, type="primary"):
             st.rerun()
 
         footer()
-
-        # Auto-poll: sleep 5s then rerun — keeps session alive, no page reload
-        _time.sleep(5)
-        st.session_state[poll_key] += 1
-        st.rerun()
-        return
+        return  # Do NOT sleep — return and let JS handle polling
 
     # ── OPEN — show exam setup ─────────────────
     st.markdown(f"""
@@ -3684,25 +3808,38 @@ def page_realtime():
             f'Correct +{rules["correct"]} · Wrong {rules["wrong"]} · Blank {rules["blank"]}</div>',
             unsafe_allow_html=True)
 
+    # Show AI-resistant settings for this competition
+    settings = load_settings(comp_name)
+    ai_layers = [k for k in ["anti_copy_text","noise_canvas","block_ctrl_c",
+                              "block_text_selection","block_paste_answer","block_drag",
+                              "block_right_click","tab_switch_warning","block_printscreen",
+                              "clipboard_api_override","devtools_detection","screen_capture_block"]
+                 if settings.get(k)]
+    if ai_layers:
+        st.markdown(
+            f'<div style="background:#FDF2F8;border:1px solid #FBCFE8;border-radius:8px;'
+            f'padding:10px 14px;font-size:12px;color:#9D174D;margin-bottom:12px;">'
+            f'🛡️ <strong>AI-resistant mode active</strong> · {len(ai_layers)}/12 layers enabled</div>',
+            unsafe_allow_html=True)
+
     if st.button("🚀  Start Competition Exam", type="primary", use_container_width=True):
         with st.spinner("Loading questions…"):
             qs = fetch_questions(comp_name, level, difficulty, n_questions)
         if not qs:
             st.error("No questions found for this selection. Please try a different difficulty or level.")
         else:
-            settings = load_settings(comp_name)
             st.session_state.update({
-                "page":        "exam",
-                "competition": comp_name,
-                "level":       level,
-                "difficulty":  difficulty,
-                "questions":   qs,
-                "answers":     {},
-                "flagged":     set(),
-                "current_idx": 0,
-                "start_time":  time.time(),
-                "time_limit":  suggested,
-                "exam_settings": settings,
+                "page":          "exam",
+                "competition":   comp_name,
+                "level":         level,
+                "difficulty":    difficulty,
+                "questions":     qs,
+                "answers":       {},
+                "flagged":       set(),
+                "current_idx":   0,
+                "start_time":    time.time(),
+                "time_limit":    suggested,
+                "exam_settings": settings,   # ← includes all AI-resistant settings
                 "from_realtime": True,
             })
             st.rerun()
