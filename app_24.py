@@ -3273,10 +3273,39 @@ def page_history():
                     dur = s.get("duration_sec",0)
                     st.markdown(f"**Duration:** {dur//60}m {dur%60}s")
                     st.markdown(f"**Questions:** {s.get('total_questions','—')}")
-                    correct = sum(1 for a in s.get("answers",{}).values() if a.get("is_correct"))
-                    wrong   = sum(1 for a in s.get("answers",{}).values() if not a.get("is_correct") and a.get("chosen"))
-                    blank   = sum(1 for a in s.get("answers",{}).values() if not a.get("chosen"))
+                    answers_map = s.get("answers",{})
+                    correct = sum(1 for a in answers_map.values() if a.get("is_correct"))
+                    wrong   = sum(1 for a in answers_map.values() if not a.get("is_correct") and a.get("chosen"))
+                    blank   = sum(1 for a in answers_map.values() if not a.get("chosen"))
                     st.markdown(f"✅ {correct} correct &nbsp; ❌ {wrong} wrong &nbsp; ⬜ {blank} blank")
+
+                # ── Per-question answer log ───────────────────────
+                if answers_map:
+                    st.divider()
+                    st.markdown("**Answer log**")
+                    # Table header
+                    h1,h2,h3,h4,h5,h6 = st.columns([1,4,2,2,2,2])
+                    for col,lbl in zip([h1,h2,h3,h4,h5,h6],
+                                       ["Q","Topic","Your answer","Correct","Result","Time"]):
+                        col.markdown(f"<span style='font-size:11px;color:#8898CC;text-transform:uppercase;"
+                                     f"letter-spacing:.06em;font-family:monospace;'>{lbl}</span>",
+                                     unsafe_allow_html=True)
+                    st.markdown("<hr style='margin:4px 0;border-color:#E8ECF8;'>", unsafe_allow_html=True)
+                    for i, (qid, ans) in enumerate(sorted(answers_map.items()), 1):
+                        ok     = ans.get("is_correct", False)
+                        chosen = ans.get("chosen") or "—"
+                        right  = ans.get("correct") or "—"
+                        topic  = ans.get("topic","—")
+                        tsec   = ans.get("time_sec", 0)
+                        icon   = "✅" if ok else ("⬜" if not ans.get("chosen") else "❌")
+                        r1,r2,r3,r4,r5,r6 = st.columns([1,4,2,2,2,2])
+                        r1.markdown(f"**{i}**")
+                        r2.markdown(f"<span style='font-size:13px;'>{topic}</span>",
+                                    unsafe_allow_html=True)
+                        r3.markdown(f"`{chosen}`")
+                        r4.markdown(f"`{right}`")
+                        r5.markdown(icon)
+                        r6.markdown(f"{tsec}s" if tsec else "—")
 
     st.markdown("</div>", unsafe_allow_html=True)
     footer()
@@ -3560,51 +3589,54 @@ def page_realtime():
 
     # ── NOT STARTED / WAITING ─────────────────
     if status != "open":
-        # Auto-refresh every 10 seconds while waiting
-        import streamlit.components.v1 as _comp
-        _comp.html(
-            "<script>setTimeout(function(){window.parent.location.reload();},10000);</script>",
-            height=0
-        )
-        opened_str = ""
-        if rt_data.get("opened_at"):
-            opened_str = rt_data["opened_at"].strftime("%d %b %Y %H:%M")
+        # Use Streamlit's built-in auto-rerun — does NOT reload page or kill session
+        import time as _time
+        # Poll every 5 seconds using session_state counter
+        poll_key = f"rt_poll_{rt_doc_id}"
+        if poll_key not in st.session_state:
+            st.session_state[poll_key] = 0
 
         st.markdown(f"""
         <div class="mc-hero">
-          <div class="mc-hero-eyebrow">Realtime Competition</div>
+          <div class="mc-hero-eyebrow">Realtime Competition · Waiting Room</div>
           <div class="mc-hero-title"><em>{comp_name}</em></div>
         </div>
-        <div class="mc-body" style="text-align:center;padding:60px 28px;">
-          <div style="font-size:64px;margin-bottom:16px;animation:pulse 2s ease-in-out infinite;">⏳</div>
-          <div style="font-family:'Fraunces',serif;font-size:28px;font-weight:300;
-                      color:#1B2B6B;margin-bottom:12px;">Waiting for competition to start…</div>
-          <div style="font-size:15px;color:#8898CC;margin-bottom:8px;">
-            Welcome, <strong>{name}</strong>! You are registered for:
+        <div class="mc-body" style="text-align:center;padding:48px 28px;">
+          <div style="font-size:64px;margin-bottom:16px;">⏳</div>
+          <div style="font-family:'Fraunces',serif;font-size:26px;font-weight:300;
+                      color:#1B2B6B;margin-bottom:10px;">Waiting for competition to start…</div>
+          <div style="font-size:15px;color:#5060A0;margin-bottom:8px;">
+            Welcome, <strong>{name}</strong>
           </div>
-          <div style="font-size:20px;font-weight:600;color:#1B2B6B;margin-bottom:24px;">
+          <div style="font-size:18px;font-weight:600;color:#1B2B6B;margin-bottom:24px;">
             {comp_name}
           </div>
           <div style="background:#EEF3FF;border:1.5px solid #C8D8FF;border-radius:12px;
-                      padding:16px 24px;display:inline-block;margin-bottom:24px;">
-            <div style="font-size:13px;color:#8898CC;margin-bottom:4px;">Status</div>
-            <div style="font-size:18px;font-weight:600;color:#4A7CF7;">
+                      padding:14px 24px;display:inline-block;margin-bottom:20px;">
+            <div style="font-size:12px;color:#8898CC;margin-bottom:4px;letter-spacing:.08em;
+                        text-transform:uppercase;font-family:monospace;">Status</div>
+            <div style="font-size:17px;font-weight:600;color:#4A7CF7;">
               🟡 Waiting for admin to open the exam
             </div>
           </div>
-          <div style="font-size:13px;color:#8898CC;">
-            This page refreshes automatically every 10 seconds.<br>
-            The exam will start as soon as your administrator opens it.
+          <div style="font-size:13px;color:#8898CC;margin-top:8px;">
+            This page checks automatically every 5 seconds.<br>
+            The exam will open on this screen without any page reload or re-login.
           </div>
-        </div>
-        <style>
-        @keyframes pulse {{0%,100%{{opacity:1}}50%{{opacity:.5}}}}
-        </style>""", unsafe_allow_html=True)
+        </div>""", unsafe_allow_html=True)
 
         col1,col2,col3 = st.columns([1,1,1])
         if col2.button("🔄  Check now", use_container_width=True, type="primary"):
+            st.session_state[poll_key] += 1
             st.rerun()
-        footer(); return
+
+        footer()
+
+        # Auto-poll: sleep 5s then rerun — keeps session alive, no page reload
+        _time.sleep(5)
+        st.session_state[poll_key] += 1
+        st.rerun()
+        return
 
     # ── OPEN — show exam setup ─────────────────
     st.markdown(f"""
@@ -3680,9 +3712,127 @@ def page_realtime():
 
 
 # ══════════════════════════════════════════════
-# Sidebar
+# Page: Admin View Student History
 # ══════════════════════════════════════════════
-def render_sidebar():
+def page_admin_student_history():
+    require_auth(); require_admin(); inject_css()
+    uid   = st.session_state.get("admin_view_uid","")
+    name  = st.session_state.get("admin_view_name","Student")
+    topbar(f"History — {name}")
+
+    if not uid:
+        st.error("No student selected."); return
+
+    try:
+        sessions = [s.to_dict() for s in
+                    db.collection("users").document(uid)
+                    .collection("exam_sessions")
+                    .order_by("timestamp_start",
+                              direction=firestore.Query.DESCENDING)
+                    .limit(100).stream()]
+    except Exception as e:
+        st.error(f"Error: {e}"); sessions = []
+
+    st.markdown(f"""
+    <div class="mc-hero">
+      <div class="mc-hero-eyebrow">Admin view · Student history</div>
+      <div class="mc-hero-title"><em>{name}</em>'s answers</div>
+      <div class="mc-metrics">
+        <div class="mc-metric"><div class="mc-metric-label">Sessions</div>
+          <div class="mc-metric-val">{len(sessions)}</div></div>
+        <div class="mc-metric"><div class="mc-metric-label">Avg Accuracy</div>
+          <div class="mc-metric-val">{round(sum(s.get("pct",0) for s in sessions)/len(sessions),1) if sessions else 0}%</div></div>
+        <div class="mc-metric"><div class="mc-metric-label">Best Score</div>
+          <div class="mc-metric-val">{max((s.get("pct",0) for s in sessions),default=0)}%</div></div>
+        <div class="mc-metric"><div class="mc-metric-label">Competitions</div>
+          <div class="mc-metric-val">{len(set(s.get("competition","") for s in sessions))}</div></div>
+      </div>
+    </div>
+    <div class="mc-body">""", unsafe_allow_html=True)
+
+    if st.button("← Back to Members", use_container_width=False):
+        st.session_state["page"] = "admin"; st.rerun()
+
+    if not sessions:
+        st.info("No sessions recorded yet.")
+        st.markdown("</div>", unsafe_allow_html=True); footer(); return
+
+    # Filter
+    comps = sorted(set(s.get("competition","") for s in sessions))
+    flt   = st.selectbox("Filter by competition", ["All"]+comps, key="adm_hist_filter")
+    show  = [s for s in sessions if flt=="All" or s.get("competition","")==flt]
+
+    for s in show:
+        ts  = s.get("timestamp_start")
+        dt  = ts.strftime("%d %b %Y  %H:%M") if ts else "—"
+        pct = s.get("pct",0)
+        dot = "🟢" if pct>=70 else ("🟡" if pct>=50 else "🔴")
+        answers_map = s.get("answers",{})
+        correct = sum(1 for a in answers_map.values() if a.get("is_correct"))
+        wrong   = sum(1 for a in answers_map.values() if not a.get("is_correct") and a.get("chosen"))
+        blank   = sum(1 for a in answers_map.values() if not a.get("chosen"))
+
+        with st.expander(
+            f"{dot}  {s.get('competition','')} · {s.get('level','')} · "
+            f"{s.get('difficulty','').capitalize()} · "
+            f"**{s.get('raw_score','')} / {s.get('max_score','')}** ({pct}%) · {dt}"
+        ):
+            # Summary row
+            c1,c2,c3 = st.columns(3)
+            dur = s.get("duration_sec",0)
+            c1.markdown(f"**Duration:** {dur//60}m {dur%60}s")
+            c2.markdown(f"**Questions:** {s.get('total_questions','—')}")
+            c3.markdown(f"✅ {correct} &nbsp; ❌ {wrong} &nbsp; ⬜ {blank}")
+
+            # Topic breakdown
+            tbd = s.get("topic_breakdown",{})
+            if tbd:
+                st.markdown("**Topic breakdown**")
+                for topic,v in tbd.items():
+                    tp    = round(v["correct"]/v["total"]*100) if v["total"]>0 else 0
+                    color = "#4A7CF7" if tp>=50 else "#F472B6"
+                    st.markdown(
+                        f'<div class="mc-topic-row">'
+                        f'<span class="mc-topic-name">{topic}</span>'
+                        f'<div class="mc-bar-bg"><div class="mc-bar-fill" '
+                        f'style="width:{tp}%;background:{color};"></div></div>'
+                        f'<span class="mc-bar-pct">{tp}%</span></div>',
+                        unsafe_allow_html=True)
+
+            # Per-question answer log
+            if answers_map:
+                st.divider()
+                st.markdown("**Per-question answer log**")
+                h1,h2,h3,h4,h5,h6 = st.columns([1,4,2,2,2,2])
+                for col,lbl in zip([h1,h2,h3,h4,h5,h6],
+                                   ["Q","Topic","Chosen","Correct","Result","Time(s)"]):
+                    col.markdown(
+                        f"<span style='font-size:11px;color:#8898CC;text-transform:uppercase;"
+                        f"letter-spacing:.06em;font-family:monospace;'>{lbl}</span>",
+                        unsafe_allow_html=True)
+                st.markdown("<hr style='margin:4px 0;border-color:#E8ECF8;'>",
+                            unsafe_allow_html=True)
+                for i,(qid,ans) in enumerate(sorted(answers_map.items()),1):
+                    ok     = ans.get("is_correct",False)
+                    chosen = ans.get("chosen") or "—"
+                    right  = ans.get("correct") or "—"
+                    topic  = ans.get("topic","—")
+                    tsec   = ans.get("time_sec",0)
+                    icon   = "✅" if ok else ("⬜" if not ans.get("chosen") else "❌")
+                    r1,r2,r3,r4,r5,r6 = st.columns([1,4,2,2,2,2])
+                    r1.markdown(f"**{i}**")
+                    r2.markdown(f"<span style='font-size:13px;'>{topic}</span>",
+                                unsafe_allow_html=True)
+                    r3.markdown(f"`{chosen}`")
+                    r4.markdown(f"`{right}`")
+                    r5.markdown(icon)
+                    r6.markdown(f"{tsec}" if tsec else "—")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+    footer()
+
+
+
     if "uid" not in st.session_state: return
     with st.sidebar:
         st.markdown(f"**{st.session_state.get('display_name','')}**")
@@ -3775,6 +3925,7 @@ def main():
     elif page=="leaderboard":      page_leaderboard()
     elif page=="admin_analytics":  page_admin_analytics()
     elif page=="realtime":         page_realtime()
+    elif page=="admin_student_history": page_admin_student_history()
     else:
         st.error(f"Unknown page: {page}")
         st.session_state["page"]="login"; st.rerun()
