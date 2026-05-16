@@ -525,6 +525,18 @@ COMPETITIONS_BUILTIN = {
 
 _custom_comp_cache = {}
 _custom_comp_ts = 0
+_disabled_comp_cache = set()
+_disabled_comp_ts = 0
+
+def _invalidate_custom_cache():
+    global _custom_comp_cache, _custom_comp_ts
+    _custom_comp_cache = {}
+    _custom_comp_ts = 0
+
+def _invalidate_disabled_cache():
+    global _disabled_comp_cache, _disabled_comp_ts
+    _disabled_comp_cache = set()
+    _disabled_comp_ts = 0
 
 def load_custom_competitions() -> dict:
     """Load admin-created competitions from Firestore. Simple TTL cache."""
@@ -553,8 +565,6 @@ def load_custom_competitions() -> dict:
     except:
         return _custom_comp_cache or {}
 
-_disabled_comp_cache = set()
-_disabled_comp_ts = 0
 
 def load_disabled_competitions() -> set:
     """Return set of disabled competition names. Simple TTL cache."""
