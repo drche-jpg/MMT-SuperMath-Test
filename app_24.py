@@ -648,7 +648,12 @@ def get_profile(uid: str) -> dict:
 
 def require_auth():
     if "uid" not in st.session_state:
-        st.session_state["page"] = "login"; st.rerun()
+        # Preserve comp param so student returns to competition after login
+        comp = st.query_params.get("comp","")
+        if comp:
+            st.session_state["pending_comp"] = comp
+        st.session_state["page"] = "login"
+        st.rerun()
 
 def require_admin():
     if st.session_state.get("role") != "admin":
@@ -3681,42 +3686,48 @@ def page_realtime():
 
     # ── NOT STARTED / WAITING ─────────────────
     if status != "open":
-        # The correct approach for Streamlit Cloud:
-        # Use st_autorefresh via a JS component that clicks a hidden button
-        # This triggers a real Streamlit rerun without sleeping the thread
-        # or doing a full browser page reload (both of which kill the session)
+        # RELIABLE APPROACH: Use a Streamlit checkbox that JS toggles.
+        # Toggling a checkbox value triggers a widget state change
+        # which causes st.rerun() WITHOUT any page reload.
+        # Session state (uid, rt_comp, page) is fully preserved.
 
-        poll_key = f"rt_auto_{rt_doc_id}"
+        cb_key = f"rt_cb_{rt_doc_id}"
+        cb_val = st.session_state.get(cb_key, False)
 
-        # Hidden auto-check button — JS will click it every 5 seconds
-        auto_check = st.button("auto_check_hidden", key=poll_key)
-        if auto_check:
+        # Render the checkbox (will be hidden by CSS)
+        new_cb = st.checkbox("poll_trigger", value=cb_val, key=cb_key)
+        if new_cb != cb_val:
+            # Checkbox was toggled by JS — rerun to re-read Firestore status
             st.rerun()
 
-        # JS: find the hidden button and click it every 5s
-        components.html(f"""
+        # JS: toggle the checkbox every 6 seconds
+        components.html("""
 <script>
-(function() {{
-  var interval = setInterval(function() {{
-    // Find all buttons and click the one labelled auto_check_hidden
-    var btns = window.parent.document.querySelectorAll('button');
-    for (var i=0; i<btns.length; i++) {{
-      if (btns[i].innerText.trim() === 'auto_check_hidden') {{
-        btns[i].click();
-        break;
-      }}
-    }}
-  }}, 6000);  // every 6 seconds
-}})();
+(function() {
+  function toggleCheckbox() {
+    try {
+      var cbs = window.parent.document.querySelectorAll('input[type="checkbox"]');
+      for (var i = 0; i < cbs.length; i++) {
+        var label = cbs[i].closest('label');
+        if (label && label.innerText.trim() === 'poll_trigger') {
+          cbs[i].click();
+          return;
+        }
+      }
+    } catch(e) {}
+  }
+  // Start polling after 6 seconds, repeat every 6 seconds
+  setTimeout(function poll() {
+    toggleCheckbox();
+    setTimeout(poll, 6000);
+  }, 6000);
+})();
 </script>""", height=0, scrolling=False)
 
-        # Hide the auto-check button with CSS
+        # Hide the poll checkbox completely
         st.markdown("""
 <style>
-button[kind="secondary"] {{ }}
-div[data-testid="stButton"] button:has(> div > p:contains("auto_check_hidden")) {{
-  display: none !important;
-}}
+div[data-testid="stCheckbox"]:has(label p) { display: none !important; }
 </style>""", unsafe_allow_html=True)
 
         st.markdown(f"""
@@ -3743,24 +3754,22 @@ div[data-testid="stButton"] button:has(> div > p:contains("auto_check_hidden")) 
               🟡 Waiting for admin to open the exam
             </div>
           </div>
-          <div style="font-size:13px;color:#8898CC;margin-top:8px;line-height:1.7;">
-            ✅ You are logged in and registered.<br>
-            🔄 This page checks every 6 seconds automatically.<br>
-            ▶️ When admin opens the exam, it will appear here instantly<br>
-            &nbsp;&nbsp;&nbsp;&nbsp;without any re-login required.
+          <div style="font-size:13px;color:#8898CC;margin-top:8px;line-height:1.8;">
+            ✅ You are logged in as <strong>{name}</strong><br>
+            🔄 Auto-checks every 6 seconds — no re-login needed<br>
+            ▶️ Exam will appear on this screen the moment admin opens it
           </div>
         </div>
         <style>
         @keyframes pulse_wait {{0%,100%{{opacity:1}}50%{{opacity:.4}}}}
         </style>""", unsafe_allow_html=True)
 
-        # Manual check button (visible, centered)
         _, mid, _ = st.columns([2,1,2])
         if mid.button("🔄  Check now", use_container_width=True, type="primary"):
             st.rerun()
 
         footer()
-        return  # Do NOT sleep — return and let JS handle polling
+        return
 
     # ── OPEN — show exam setup ─────────────────
     st.markdown(f"""
@@ -3994,7 +4003,8 @@ def page_admin_student_history():
 # Router
 # ══════════════════════════════════════════════
 def main():
-    if "page" not in st.session_state: st.session_state["page"]="login"
+    if "page" not in st.session_state:
+        st.session_state["page"] = "login"
 
     params = st.query_params
 
@@ -4002,70 +4012,68 @@ def main():
     if "comp" in params:
         comp_param = params.get("comp","").strip()
 
-        if comp_param and "uid" not in st.session_state:
-            # Not logged in — save pending and go to login
-            st.session_state["pending_comp"]  = comp_param
-            st.session_state["pending_level"] = params.get("level","")
+        if comp_param:
+            if "uid" not in st.session_state:
+                # Not logged in yet — save for after login
+                if st.session_state.get("pending_comp") != comp_param:
+                    st.session_state["pending_comp"]  = comp_param
+                    st.session_state["pending_level"] = params.get("level","")
 
-        elif comp_param and "uid" in st.session_state:
-            # Logged in — check if this is a realtime competition
-            if st.session_state.get("rt_comp") != comp_param:
-                # New competition link — check its realtime status
+            elif st.session_state.get("rt_comp") != comp_param:
+                # Logged in and this is a NEW competition link
                 rt_doc_id = comp_param.replace(" ","_").replace("/","_")
                 try:
-                    rt_doc  = db.collection("realtime_sessions").document(rt_doc_id).get()
-                    rt_data = rt_doc.to_dict() if rt_doc.exists else {}
+                    rt_doc    = db.collection("realtime_sessions").document(rt_doc_id).get()
+                    rt_data   = rt_doc.to_dict() if rt_doc.exists else {}
                     rt_status = rt_data.get("status","not started")
                 except:
                     rt_status = "not started"
-
-                # Store and route
                 st.session_state["rt_comp"]   = comp_param
                 st.session_state["rt_status"] = rt_status
-
-                # Always go to realtime page (waiting room or open exam)
-                st.session_state["page"] = "realtime"
-                # Clear any prefill to avoid conflict
+                st.session_state["page"]      = "realtime"
                 st.session_state.pop("pending_comp",  None)
                 st.session_state.pop("pending_level", None)
                 st.rerun()
+            else:
+                # Same competition already loaded — just ensure page stays realtime
+                # (this branch runs on every auto-poll rerun)
+                current_page = st.session_state.get("page","")
+                if current_page not in ("realtime","exam","result"):
+                    st.session_state["page"] = "realtime"
 
     render_sidebar()
     page = st.session_state["page"]
 
-    # ── After login, handle pending competition link ──
+    # ── After login, redirect to pending competition ──
     if "uid" in st.session_state and st.session_state.get("pending_comp"):
-        comp_param = st.session_state.pop("pending_comp","")
+        comp_param  = st.session_state.pop("pending_comp","")
         level_param = st.session_state.pop("pending_level","")
-
         if comp_param:
-            # Check realtime status
             rt_doc_id = comp_param.replace(" ","_").replace("/","_")
             try:
-                rt_doc  = db.collection("realtime_sessions").document(rt_doc_id).get()
-                rt_data = rt_doc.to_dict() if rt_doc.exists else {}
+                rt_doc    = db.collection("realtime_sessions").document(rt_doc_id).get()
+                rt_data   = rt_doc.to_dict() if rt_doc.exists else {}
                 rt_status = rt_data.get("status","not started")
             except:
                 rt_status = "not started"
-
             st.session_state["rt_comp"]   = comp_param
             st.session_state["rt_status"] = rt_status
             st.session_state["page"]      = "realtime"
             st.rerun()
 
-    if   page=="login":            page_login()
-    elif page=="dashboard":        page_dashboard()
-    elif page=="exam":             page_exam()
-    elif page=="result":           page_result()
-    elif page=="admin":            page_admin()
-    elif page=="history":          page_history()
-    elif page=="leaderboard":      page_leaderboard()
-    elif page=="admin_analytics":  page_admin_analytics()
-    elif page=="realtime":         page_realtime()
-    elif page=="admin_student_history": page_admin_student_history()
+    if   page=="login":                   page_login()
+    elif page=="dashboard":               page_dashboard()
+    elif page=="exam":                    page_exam()
+    elif page=="result":                  page_result()
+    elif page=="admin":                   page_admin()
+    elif page=="history":                 page_history()
+    elif page=="leaderboard":             page_leaderboard()
+    elif page=="admin_analytics":         page_admin_analytics()
+    elif page=="realtime":                page_realtime()
+    elif page=="admin_student_history":   page_admin_student_history()
     else:
         st.error(f"Unknown page: {page}")
-        st.session_state["page"]="login"; st.rerun()
+        st.session_state["page"] = "login"; st.rerun()
 
 if __name__=="__main__":
     main()
