@@ -94,7 +94,7 @@ def page_admin():
             "anthropic-version":"2023-06-01",
         }
 
-        def ai_call(messages:list, max_tokens:int=1500) -> str | None:
+        def ai_call(messages:list, max_tokens:int=1500):
             """Make a Claude API call; return text or None."""
             if not API_KEY: return None
             try:
@@ -188,7 +188,7 @@ Rules:
                             "topic":"Other","difficulty":"intermediate","solution_text":""}
             return {}
 
-        def ai_generate_solution(q_text:str, choices:list, correct:str, competition:str) -> str:
+        def ai_generate_solution(q_text:str, choices:list, correct:str, competition:str):
             """Generate a worked solution for a typed/existing question."""
             choices_str = ""
             if choices:
@@ -1035,7 +1035,7 @@ Admin2,admin2@example.com,AdminPass!,admin
                             "scoring":    {"correct":cn_score_c,"wrong":cn_score_w,"blank":0},
                             "created_at": datetime.now(timezone.utc),
                         })
-                        global _custom_comp_cache, _custom_comp_ts; _custom_comp_cache = {}; _custom_comp_ts = 0  # clear cache
+                        _invalidate_custom_cache()  # clear cache
                         st.success(f"✅  **{cn_name}** added to catalog!")
                         st.info(f"Students can now select it from the exam dropdown. "
                                 f"Add questions via the **🔗 Add Questions** tab.")
@@ -1078,7 +1078,7 @@ Admin2,admin2@example.com,AdminPass!,admin
                                 "scoring":{"correct":sc,"wrong":sw,"blank":0},
                                 "created_at":datetime.now(timezone.utc),
                             })
-                            global _custom_comp_cache, _custom_comp_ts; _custom_comp_cache = {}; _custom_comp_ts = 0
+                            _invalidate_custom_cache()
                             st.success(f"Added {name}!"); st.rerun()
                         except Exception as e: st.error(str(e))
 
@@ -1156,11 +1156,11 @@ Admin2,admin2@example.com,AdminPass!,admin
                                     "secs_per_q":int(e_spq),
                                     "scoring":{"correct":e_sc,"wrong":e_sw,"blank":0},
                                 })
-                                global _custom_comp_cache, _custom_comp_ts; _custom_comp_cache = {}; _custom_comp_ts = 0
+                                _invalidate_custom_cache()
                                 st.success("Updated!"); st.rerun()
                             if sb2.button("🗑️  Delete", key=f"ecdel_{doc.id}", use_container_width=True):
                                 db.collection("competition_catalog").document(doc.id).delete()
-                                global _custom_comp_cache, _custom_comp_ts; _custom_comp_cache = {}; _custom_comp_ts = 0
+                                _invalidate_custom_cache()
                                 st.warning(f"Deleted {d.get('name','')}"); st.rerun()
             except Exception as e:
                 st.error(f"Error: {e}")
